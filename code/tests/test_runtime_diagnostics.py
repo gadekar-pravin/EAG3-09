@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -13,6 +14,8 @@ import flow
 import mcp_runner
 import memory
 from schemas import MemoryItem
+
+GATEWAY_CLIENT = Path(__file__).resolve().parents[2] / "llm_gatewayV9" / "client.py"
 
 
 class _Store:
@@ -76,6 +79,25 @@ class _Stdio:
         return False
 
 
+class _SuccessfulSession:
+    def __init__(self, *_args):
+        self.calls: list[tuple[str, dict]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        text = '{"found": false, "chunks": [], "summary": "no local hit"}'
+        return type("ToolResult", (), {"content": [type("Text", (), {"text": text})()]})()
+
+
 @pytest.mark.asyncio
 async def test_run_with_tools_reports_mcp_lifecycle_phase(monkeypatch) -> None:
     monkeypatch.setattr(mcp_runner, "stdio_client", lambda _params: _Stdio())
@@ -92,6 +114,65 @@ async def test_run_with_tools_reports_mcp_lifecycle_phase(monkeypatch) -> None:
     msg = str(ei.value)
     assert "mcp tool loop failed during mcp_initialize" in msg
     assert "RuntimeError: initialize exploded" in msg
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_pins_continuation_to_tool_call_provider(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_runner, "stdio_client", lambda _params: _Stdio())
+    monkeypatch.setattr(mcp_runner, "ClientSession", _SuccessfulSession)
+    provider_pins: list[str | None] = []
+
+    async def fake_chat(**kwargs):
+        provider_pins.append(kwargs["provider_pin"])
+        if len(provider_pins) == 1:
+            return {
+                "provider": "github",
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "search_knowledge",
+                        "arguments": {"query": "Claude Shannon", "k": 5},
+                    }
+                ],
+            }
+        return {"provider": "github", "text": '{"found": false}', "tool_calls": []}
+
+    monkeypatch.setattr(mcp_runner, "_chat", fake_chat)
+
+    reply = await mcp_runner.run_with_tools(
+        prompt="prompt",
+        tools_payload=[{"name": "search_knowledge"}],
+        agent="retriever",
+        session_id="sid",
+    )
+
+    assert reply["text"] == '{"found": false}'
+    assert provider_pins == [None, "github"]
+
+
+def test_gateway_client_error_includes_response_body(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("gateway_client_under_test", GATEWAY_CLIENT)
+    assert spec and spec.loader
+    gateway_client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gateway_client)
+
+    def fake_post(url, **_kwargs):
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            502,
+            request=request,
+            text='{"detail":"gemini failed: missing thought_signature"}',
+        )
+
+    monkeypatch.setattr(gateway_client.httpx, "post", fake_post)
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        gateway_client.LLM().chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert "502 Bad Gateway" in str(ei.value)
+    assert "response=" in str(ei.value)
+    assert "missing thought_signature" in str(ei.value)
 
 
 def test_memory_embed_failure_logs_gateway_body_and_keyword_fallback(

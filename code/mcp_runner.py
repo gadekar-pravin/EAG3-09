@@ -67,6 +67,7 @@ async def run_with_tools(*, prompt: str, tools_payload: list[dict],
     one-shot call)."""
     messages: list[dict] = [{"role": "user", "content": prompt}]
     last_reply: dict = {}
+    locked_provider: str | None = provider_pin
 
     server_params = StdioServerParameters(command=sys.executable, args=[str(MCP_SERVER)])
     phase = "mcp_stdio"
@@ -81,7 +82,7 @@ async def run_with_tools(*, prompt: str, tools_payload: list[dict],
                     phase = "gateway_chat"
                     reply = await _chat(messages=messages, tools=tools_payload,
                                         agent=agent, session_id=session_id,
-                                        provider_pin=provider_pin,
+                                        provider_pin=locked_provider,
                                         max_tokens=max_tokens, temperature=temperature)
                     last_reply = reply
                     tool_calls = reply.get("tool_calls") or []
@@ -89,6 +90,11 @@ async def run_with_tools(*, prompt: str, tools_payload: list[dict],
                         final_reply = reply
                         phase = "mcp_shutdown"
                         break
+                    # Tool-call continuations must stay on the provider that
+                    # produced the call; provider dialect metadata is not
+                    # safely portable across workers.
+                    if locked_provider is None and reply.get("provider"):
+                        locked_provider = str(reply["provider"])
                     # Carry the assistant's tool-call turn back through.
                     messages.append({
                         "role": "assistant",

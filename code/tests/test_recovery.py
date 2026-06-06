@@ -34,6 +34,8 @@ GATEWAY_TRANSIENT_STRINGS = [
     "exception: HTTPStatusError: Server error '503 Service Unavailable' for url 'http://localhost:8108/v1/chat'",
     "exception: HTTPStatusError: Server error '502 Bad Gateway' for url 'http://localhost:8108/v1/chat'",
     "exception: HTTPStatusError: Server error '504 Gateway Timeout' for url 'http://localhost:8108/v1/chat'",
+    "exception: ToolLoopError: mcp tool loop failed during gateway_chat: HTTPStatusError: Server error '502 Bad Gateway'",
+    "exception: ToolLoopError: mcp tool loop failed during gateway_chat: HTTPStatusError: Server error '503 Service Unavailable'",
     "Timeout occurred while waiting for provider reply",
     "Connection reset by peer",
     "httpx.ConnectError: All connection attempts failed",
@@ -50,7 +52,7 @@ GENUINE_UPSTREAM_STRINGS = [
     "file not found: /nonexistent/path.txt",
     "(not found)",
     "Tavily API returned no results for query 'xyz'",
-    "exception: ToolLoopError: mcp tool loop failed during gateway_chat: HTTPStatusError: Server error '502 Bad Gateway'",
+    "exception: ToolLoopError: mcp tool loop failed during tool_dispatch:search_knowledge: RuntimeError: bad tool payload",
     "",  # empty error text — treat as upstream by convention
 ]
 

@@ -32,8 +32,6 @@ def classify_failure(error_text: str) -> RecoveryReason:
         return "upstream_failure"
     if "malformed" in e or "validationerror" in e or "validation error" in e:
         return "validation_error"
-    if "mcp tool loop failed" in e:
-        return "upstream_failure"
     transient_markers = (
         "503", "502", "504",
         "timeout", "timed out",
@@ -42,6 +40,8 @@ def classify_failure(error_text: str) -> RecoveryReason:
     )
     if any(m in e for m in transient_markers):
         return "transient"
+    if "mcp tool loop failed" in e:
+        return "upstream_failure"
     return "upstream_failure"
 
 

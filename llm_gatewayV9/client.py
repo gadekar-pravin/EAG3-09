@@ -51,7 +51,7 @@ class LLM:
         }
         body = {k: v for k, v in body.items() if v is not None}
         r = httpx.post(f"{self.base_url}/v1/chat", json=body, timeout=self.timeout)
-        r.raise_for_status()
+        _raise_for_status_with_body(r)
         return r.json()
 
     def chat_batch(self, calls: list[dict], max_concurrency: int = 4) -> list[dict]:
@@ -61,7 +61,7 @@ class LLM:
         `{"error": ..., "status_code": ...}` rather than raising."""
         body = {"calls": calls, "max_concurrency": max_concurrency}
         r = httpx.post(f"{self.base_url}/v1/chat/batch", json=body, timeout=self.timeout)
-        r.raise_for_status()
+        _raise_for_status_with_body(r)
         return r.json().get("results", [])
 
     def capabilities(self):
@@ -70,7 +70,7 @@ class LLM:
     def cost_by_agent(self, session: Optional[str] = None) -> dict:
         params = {"session": session} if session else {}
         r = httpx.get(f"{self.base_url}/v1/cost/by_agent", params=params, timeout=30)
-        r.raise_for_status()
+        _raise_for_status_with_body(r)
         return r.json()
 
     def embed(self, text: str,
@@ -81,8 +81,23 @@ class LLM:
         if provider:
             body["provider"] = provider
         r = httpx.post(f"{self.base_url}/v1/embed", json=body, timeout=self.timeout)
-        r.raise_for_status()
+        _raise_for_status_with_body(r)
         return r.json()
+
+
+def _raise_for_status_with_body(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text.strip()
+        if body:
+            message = f"{exc}; response={body[:1000]}"
+            raise httpx.HTTPStatusError(
+                message,
+                request=exc.request,
+                response=exc.response,
+            ) from exc
+        raise
 
 
 def ask(prompt: str, provider: str = None, **kw) -> str:
