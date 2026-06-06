@@ -10,11 +10,16 @@ from fastapi.staticfiles import StaticFiles
 from jsonschema import Draft202012Validator, ValidationError
 
 ROOT = Path(__file__).parent
-load_dotenv(ROOT.parent / ".env")
+# Look for .env beside the gateway, then at the repo root, then in code/
+# (where the S9 agent keeps its keys). First hit wins.
+for _candidate in (ROOT / ".env", ROOT.parent / ".env", ROOT.parent / "code" / ".env"):
+    if _candidate.exists():
+        load_dotenv(_candidate)
+        break
 
 import db
 import providers as P
-from router import Router, RouterPool, DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS, resolve
+from router import Router, RouterPool, DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS, resolve, refresh_openrouter_limits_from_key
 from cache import GeminiCache
 from schemas import ChatRequest, ChatResponse, ToolCall, RouterDecision, EmbedRequest, EmbedResponse, BatchChatRequest, VisionRequest, ResponseFormat
 import embedders as E
@@ -195,6 +200,9 @@ async def lifespan(app: FastAPI):
     db.init()
     app.state.cache = GeminiCache(ttl_seconds=300)
     app.state.providers = P.build_providers(app.state.cache)
+    # Detect the OpenRouter account tier (OPENROUTER_TIER, else key introspection)
+    # and lift its local RPM/RPD caps for paid non-":free" models.
+    await refresh_openrouter_limits_from_key(app.state.providers.get("openrouter"))
     app.state.router = Router(app.state.providers, ORDER)
     app.state.router_providers = P.build_router_providers()
     app.state.router_pool = RouterPool(app.state.router_providers, ROUTER_ORDER)
@@ -337,6 +345,14 @@ async def _resolve_image_urls(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _prefer_provider(candidates: list[str], preferred: str | None) -> list[str]:
+    """Move an agent's preferred provider to the front without removing
+    failover candidates. Agent routing is a preference, not a hard pin."""
+    if not preferred or preferred not in candidates:
+        return candidates
+    return [preferred] + [c for c in candidates if c != preferred]
+
+
 def _validate_structured(text: str, schema: dict):
     try:
         obj = json.loads(text)
@@ -364,16 +380,16 @@ async def chat(req: ChatRequest):
     est = _est_tokens(messages, system_blocks, req.max_tokens)
     explicit_override = bool(req.provider)
     required_caps = _required_caps(req)
+    agent_preference: str | None = None
 
     # V8: if the caller tagged the request with an agent name and did not
-    # pin a provider explicitly, apply agent_routing.yaml's preferred provider.
-    # This mutates req.provider so the rest of the function (router-pick,
-    # candidate-narrowing, single-candidate-wait) sees the pin.
+    # pin a provider explicitly, apply agent_routing.yaml's preferred provider
+    # as the first failover candidate. This is deliberately not an explicit
+    # override: a sick preferred provider should not strand the whole agent.
     if req.agent and not req.provider:
         pinned = AGENT_ROUTING.get(req.agent)
         if pinned and pinned in router.providers:
-            req.provider = pinned
-            explicit_override = True
+            agent_preference = pinned
 
     # V8: retry-on-5xx with `retries` surfaced in the response. The
     # per-provider failover loop below already rotates providers on
@@ -401,8 +417,10 @@ async def chat(req: ChatRequest):
         # what's actually wired in this gateway.
         tier_order = TIER_TO_ORDER[router_decision.tier]
         candidates = [p for p in tier_order if p in router.providers]
+        candidates = _prefer_provider(candidates, agent_preference)
     else:
         candidates = router.candidates(req.provider) if req.provider else list(router.order)
+        candidates = _prefer_provider(candidates, agent_preference)
 
     if req.provider and not candidates:
         raise HTTPException(400, f"unknown provider '{req.provider}'. Try one of: {list(router.providers)} or shortcuts {list(SHORTCUTS)}")
@@ -714,7 +732,7 @@ async def embed(req: EmbedRequest):
 
     t0 = time.time()
     try:
-        name, result, attempts, latency = await E.embed_with_failover(
+        name, result, attempts, latency, retries = await E.embed_with_failover(
             embedders, req.text, req.task_type, explicit=req.provider
         )
     except E.EmbedderError as e:
@@ -748,6 +766,7 @@ async def embed(req: EmbedRequest):
         attempted=_attempts_str(attempts),
         call_role="embed",
         embed_dim=result["dim"],
+        retries=retries,
     )
     return EmbedResponse(
         provider=name,

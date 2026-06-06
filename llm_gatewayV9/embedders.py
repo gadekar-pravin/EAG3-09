@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import time
+import asyncio
 from collections import deque
 from typing import Literal
 
@@ -39,6 +40,7 @@ MAX_INPUT_CHARS = 8000
 # Exponential backoff schedule for embedder failures. Resets to step 0 on
 # the first success. After step 2 the wait stays at 15s (sticky cap).
 BACKOFF_STEPS = [5, 10, 15]  # seconds per step
+MAX_EMBED_RETRIES = 3
 
 
 class EmbedderError(Exception):
@@ -214,6 +216,38 @@ def build_embedders() -> tuple[list[EmbeddingProvider], list[str]]:
     return embedders, [e.name for e in embedders]
 
 
+def _is_retryable_embed_error(exc: Exception) -> bool:
+    status = getattr(exc, "status", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    msg = str(exc).lower()
+    return (
+        (status is not None and 500 <= status < 600)
+        or status == 408
+        or "timeout" in msg
+        or isinstance(exc, (TimeoutError, httpx.TimeoutException))
+    )
+
+
+async def _embed_with_retry(
+    embedder: EmbeddingProvider,
+    text: str,
+    task_type: TaskType,
+) -> tuple[dict, int]:
+    try:
+        return await embedder.embed(text, task_type), 0
+    except Exception as exc:
+        if MAX_EMBED_RETRIES < 1 or not _is_retryable_embed_error(exc):
+            raise
+        await asyncio.sleep(min(2.0, 0.5 * (2 ** 0)))
+        try:
+            return await embedder.embed(text, task_type), 1
+        except Exception as retry_exc:
+            setattr(retry_exc, "_embed_retries", 1)
+            raise
+
+
 async def embed_with_failover(
     embedders: list[EmbeddingProvider],
     text: str,
@@ -222,7 +256,7 @@ async def embed_with_failover(
 ):
     """Run the failover ring with per-provider rate-state gating.
 
-    Returns (name, result_dict, attempts, latency_ms).
+    Returns (name, result_dict, attempts, latency_ms, retries).
 
     For each candidate:
       - call `state.can_use()` first; if rate-limited / cooled-down / in backoff,
@@ -243,6 +277,7 @@ async def embed_with_failover(
 
     last_err: Exception | None = None
     t0 = time.time()
+    retries = 0
     for e in candidates:
         ok, why = e.state.can_use()
         if not ok:
@@ -251,11 +286,13 @@ async def embed_with_failover(
                 raise EmbedderError(f"{e.name} unavailable: {why}", status=429)
             continue
         try:
-            out = await e.embed(text, task_type)
+            out, provider_retries = await _embed_with_retry(e, text, task_type)
+            retries += provider_retries
             e.state.record()
             latency = int((time.time() - t0) * 1000)
-            return e.name, out, attempts, latency
+            return e.name, out, attempts, latency, retries
         except Exception as exc:
+            retries += int(getattr(exc, "_embed_retries", 0))
             last_err = exc
             reason = str(exc)[:200]
             e.state.mark_failure(reason)

@@ -1,19 +1,130 @@
-"""Capability-aware router. Same RPM/RPD bookkeeping as V1, but now it can
-skip providers that lack a requested capability (tools/reasoning/structured/caching)."""
+"""Capability-aware router with configurable provider rate budgets.
+
+Same RPM/RPD bookkeeping as before, but per-provider rate limits are now read
+from env (e.g. GEMINI_RPM / GEMINI_RPD / GEMINI_TPM) so a paid-tier key can
+lift the conservative free-tier defaults. A zero cap means "do not enforce that
+local limit" — upstream 429s still trigger backoff. The per-call cooldown is
+derived as 60/rpm, so a higher RPM both raises the cap and widens throughput."""
 from __future__ import annotations
-import time, asyncio
+import os, time, asyncio
 from collections import deque, defaultdict
+from copy import deepcopy
+
+import httpx
 
 
-LIMITS = {
-    "ollama":     {"rpm": 9999, "rpd": 9999999, "tpm": 99999999, "cooldown": 0,   "max_ctx": 32000},
-    "cerebras":   {"rpm": 30,   "rpd": 9999,    "tpm": 60000,    "cooldown": 2,   "max_ctx": 8000,    "tokens_per_day": 1_000_000},
-    "groq":       {"rpm": 30,   "rpd": 1000,    "tpm": 6000,     "cooldown": 2,   "max_ctx": 100000},
-    "nvidia":     {"rpm": 40,   "rpd": 9999,    "tpm": 100000,   "cooldown": 2,   "max_ctx": 100000},
-    "gemini":     {"rpm": 15,   "rpd": 1000,    "tpm": 250000,   "cooldown": 4,   "max_ctx": 1000000},
-    "openrouter": {"rpm": 20,   "rpd": 50,      "tpm": 99999999, "cooldown": 3,   "max_ctx": 100000},
-    "github":     {"rpm": 10,   "rpd": 50,      "tpm": 99999999, "cooldown": 6,   "max_ctx": 8000},
+DEFAULT_LIMITS = {
+    "ollama":     {"rpm": 0,    "rpd": 0,       "tpm": 0,        "max_ctx": 32000},
+    "cerebras":   {"rpm": 30,   "rpd": 9999,    "tpm": 60000,    "max_ctx": 8000,    "tokens_per_day": 1_000_000},
+    "groq":       {"rpm": 30,   "rpd": 1000,    "tpm": 6000,     "max_ctx": 100000},
+    "nvidia":     {"rpm": 40,   "rpd": 9999,    "tpm": 100000,   "max_ctx": 100000},
+    "gemini":     {"rpm": 15,   "rpd": 1000,    "tpm": 250000,   "max_ctx": 1000000},
+    "openrouter": {"rpm": 20,   "rpd": 50,      "tpm": 99999999, "max_ctx": 100000},
+    "github":     {"rpm": 10,   "rpd": 50,      "tpm": 99999999, "max_ctx": 8000},
 }
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw.replace("_", ""))
+
+
+def _apply_numeric_overrides(limits: dict[str, dict], provider: str) -> None:
+    prefix = provider.upper()
+    for field in ("rpm", "rpd", "tpm", "max_ctx", "tokens_per_day"):
+        env_name = f"{prefix}_{field.upper()}"
+        if env_name in os.environ:
+            limits[provider][field] = _env_int(env_name, limits[provider].get(field, 0))
+
+
+def _env_flag(name: str) -> bool | None:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw in {"1", "true", "yes", "paid", "payg", "pay-as-you-go"}:
+        return True
+    if raw in {"0", "false", "no", "free"}:
+        return False
+    return None
+
+
+def _add_cooldowns(limits: dict[str, dict]) -> dict[str, dict]:
+    for provider_limits in limits.values():
+        rpm = provider_limits.get("rpm", 0)
+        provider_limits["cooldown"] = 0 if rpm <= 0 else 60 / rpm
+    return limits
+
+
+def load_limits(*, openrouter_paid: bool | None = None) -> dict[str, dict]:
+    """Return provider rate budgets with env overrides applied.
+
+    Each provider's caps can be lifted from the free-tier defaults via
+    {PROVIDER}_RPM / _RPD / _TPM / _MAX_CTX / _TOKENS_PER_DAY env vars
+    (e.g. GEMINI_RPM=4000 for a paid Tier-1 Gemini key).
+
+    OpenRouter is special: a paid account on a non-":free" model has no useful
+    local platform RPM/RPD ceiling, so those caps are dropped to 0 (upstream
+    429/backoff polices real capacity) unless OPENROUTER_RPM / OPENROUTER_RPD
+    are set explicitly. `openrouter_paid` (or OPENROUTER_TIER) selects the tier;
+    a ":free" model always keeps free-model caps."""
+    limits = deepcopy(DEFAULT_LIMITS)
+    for provider in limits:
+        _apply_numeric_overrides(limits, provider)
+
+    tier_flag = _env_flag("OPENROUTER_TIER")
+    if tier_flag is not None:
+        openrouter_paid = tier_flag
+
+    openrouter_model = (os.environ.get("OPENROUTER_MODEL") or "").strip().lower()
+    openrouter_free_model = openrouter_model.endswith(":free")
+    if openrouter_paid and not openrouter_free_model:
+        # No explicit operator cap → let upstream 429s police paid capacity.
+        if (os.environ.get("OPENROUTER_RPM") or "").strip() == "":
+            limits["openrouter"]["rpm"] = 0
+        if (os.environ.get("OPENROUTER_RPD") or "").strip() == "":
+            limits["openrouter"]["rpd"] = 0
+        limits["openrouter"]["limit_source"] = "paid"
+    else:
+        limits["openrouter"]["limit_source"] = "free"
+    if openrouter_free_model:
+        limits["openrouter"]["limit_source"] = "free-model"
+
+    return _add_cooldowns(limits)
+
+
+LIMITS = load_limits()
+
+
+def refresh_limits(*, openrouter_paid: bool | None = None) -> None:
+    """Recompute the global LIMITS in place (preserving the dict identity that
+    importers hold a reference to)."""
+    LIMITS.clear()
+    LIMITS.update(load_limits(openrouter_paid=openrouter_paid))
+
+
+async def refresh_openrouter_limits_from_key(provider) -> None:
+    """Optionally introspect the OpenRouter account tier at startup.
+
+    OPENROUTER_TIER wins if set. Otherwise, if the provider exposes an api_key,
+    query /api/v1/key and treat a non-free-tier account as paid. Any failure
+    falls back to the env-configured defaults. Gemini has no comparable
+    key-level tier endpoint, so its limits stay operator-configured."""
+    tier_flag = _env_flag("OPENROUTER_TIER")
+    if tier_flag is not None:
+        refresh_limits(openrouter_paid=tier_flag)
+        return
+    if provider is None or not getattr(provider, "api_key", ""):
+        refresh_limits()
+        return
+    try:
+        headers = {"Authorization": f"Bearer {provider.api_key}"}
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get("https://openrouter.ai/api/v1/key", headers=headers)
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        refresh_limits(openrouter_paid=not bool(data.get("is_free_tier", True)))
+    except Exception:
+        refresh_limits()
 
 SHORTCUTS = {
     "g": "gemini", "gem": "gemini", "gemini": "gemini",
@@ -65,17 +176,22 @@ class RateState:
         now = time.time()
         if now < self.unavailable_until:
             return False, f"backoff: {self.unavailable_reason} ({self.unavailable_until - now:.0f}s left)"
-        wait = limits["cooldown"] - (now - self.last_call)
+        cooldown = limits.get("cooldown", 0)
+        wait = cooldown - (now - self.last_call)
         if wait > 0:
             return False, f"cooldown ({wait:.1f}s)"
-        if len(self.calls_minute) >= limits["rpm"]:
+        rpm = limits.get("rpm", 0)
+        if rpm > 0 and len(self.calls_minute) >= rpm:
             return False, "RPM limit"
-        if self.calls_today >= limits["rpd"]:
+        rpd = limits.get("rpd", 0)
+        if rpd > 0 and self.calls_today >= rpd:
             return False, "RPD limit"
         tpm = sum(t for _, t in self.tokens_minute)
-        if tpm + est_tokens > limits["tpm"]:
+        tpm_limit = limits.get("tpm", 0)
+        if tpm_limit > 0 and tpm + est_tokens > tpm_limit:
             return False, "TPM limit"
-        if "tokens_per_day" in limits and self.tokens_today + est_tokens > limits["tokens_per_day"]:
+        tokens_per_day = limits.get("tokens_per_day", 0)
+        if tokens_per_day > 0 and self.tokens_today + est_tokens > tokens_per_day:
             return False, "daily token cap"
         return True, None
 
@@ -104,7 +220,8 @@ class RateState:
             "tpm_limit": limits["tpm"],
             "tokens_today": self.tokens_today,
             "tokens_per_day": limits.get("tokens_per_day"),
-            "cooldown_remaining": max(0, limits["cooldown"] - (now - self.last_call)) if self.last_call else 0,
+            "cooldown_s": limits.get("cooldown", 0),
+            "cooldown_remaining": max(0, limits.get("cooldown", 0) - (now - self.last_call)) if self.last_call else 0,
             "last_call": self.last_call,
             "backoff_remaining": max(0, self.unavailable_until - now),
             "backoff_reason": self.unavailable_reason if now < self.unavailable_until else "",
