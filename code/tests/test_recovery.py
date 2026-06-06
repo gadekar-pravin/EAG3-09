@@ -50,6 +50,7 @@ GENUINE_UPSTREAM_STRINGS = [
     "file not found: /nonexistent/path.txt",
     "(not found)",
     "Tavily API returned no results for query 'xyz'",
+    "exception: ToolLoopError: mcp tool loop failed during gateway_chat: HTTPStatusError: Server error '502 Bad Gateway'",
     "",  # empty error text — treat as upstream by convention
 ]
 

@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import httpx
+import networkx as nx
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import flow
+import mcp_runner
+import memory
+from schemas import MemoryItem
+
+
+class _Store:
+    def write_node(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _Registry:
+    def get(self, name: str):
+        return type("Skill", (), {"name": name})()
+
+
+@pytest.mark.asyncio
+async def test_run_one_expands_exception_group_and_keeps_prompt(monkeypatch) -> None:
+    async def boom(*_args, **_kwargs):
+        exc = ExceptionGroup(
+            "tool nursery failed",
+            [RuntimeError("mcp subprocess died"), ValueError("bad tool payload")],
+        )
+        setattr(exc, "prompt_sent", "RENDERED PROMPT")
+        raise exc
+
+    graph = type("Graph", (), {"g": nx.DiGraph()})()
+    graph.g.add_node("n:1", skill="retriever", inputs=["USER_QUERY"], metadata={})
+    executor = flow.Executor.__new__(flow.Executor)
+    executor.registry = _Registry()
+    monkeypatch.setattr(flow, "run_skill", boom)
+
+    nid, result, prompt = await executor._run_one(
+        "n:1", graph, "sid", "question", _Store(), []
+    )
+
+    assert nid == "n:1"
+    assert result.success is False
+    assert prompt == "RENDERED PROMPT"
+    assert "ExceptionGroup: tool nursery failed" in result.error
+    assert "RuntimeError: mcp subprocess died" in result.error
+    assert "ValueError: bad tool payload" in result.error
+    assert "traceback:" in result.error
+
+
+class _FailingSession:
+    def __init__(self, *_args):
+        return None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def initialize(self):
+        raise RuntimeError("initialize exploded")
+
+
+class _Stdio:
+    async def __aenter__(self):
+        return object(), object()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_reports_mcp_lifecycle_phase(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_runner, "stdio_client", lambda _params: _Stdio())
+    monkeypatch.setattr(mcp_runner, "ClientSession", _FailingSession)
+
+    with pytest.raises(mcp_runner.ToolLoopError) as ei:
+        await mcp_runner.run_with_tools(
+            prompt="prompt",
+            tools_payload=[],
+            agent="retriever",
+            session_id="sid",
+        )
+
+    msg = str(ei.value)
+    assert "mcp tool loop failed during mcp_initialize" in msg
+    assert "RuntimeError: initialize exploded" in msg
+
+
+def test_memory_embed_failure_logs_gateway_body_and_keyword_fallback(
+    monkeypatch, capsys
+) -> None:
+    request = httpx.Request("POST", "http://localhost:8109/v1/embed")
+    response = httpx.Response(
+        503,
+        request=request,
+        text='{"detail":"all embedders unavailable. attempts=[{\\"provider\\":\\"ollama\\"}]"}',
+    )
+    err = httpx.HTTPStatusError("503 Service Unavailable", request=request, response=response)
+
+    def fail_embed(*_args, **_kwargs):
+        raise err
+
+    item = MemoryItem(
+        id="mem:test",
+        kind="fact",
+        keywords=["claude", "shannon"],
+        descriptor="Claude Shannon biography",
+        value={"raw": "Claude Shannon was born in 1916."},
+        source="test",
+        run_id="run",
+    )
+    monkeypatch.setattr(memory, "_gateway_embed", fail_embed)
+    monkeypatch.setattr(memory, "_load", lambda: [item])
+
+    hits = memory.read("Claude Shannon", top_k=3)
+
+    assert hits == [item]
+    out = capsys.readouterr().out
+    assert "embedding failed" in out
+    assert "response=" in out
+    assert "attempts=" in out
+    assert "item written without vector" in out
+
+
+def test_query_echo_memory_hits_are_filtered_before_prompting() -> None:
+    query = "When was Claude Shannon born and when did he die?"
+    echo = MemoryItem(
+        id="mem:echo",
+        kind="fact",
+        descriptor="Birth and death dates of Claude Shannon",
+        value={"raw": query},
+        source="user_query",
+        run_id="old",
+    )
+    useful = MemoryItem(
+        id="mem:fact",
+        kind="fact",
+        descriptor="Claude Shannon dates",
+        value={"raw": "Claude Shannon was born April 30, 1916 and died February 24, 2001."},
+        source="researcher",
+        run_id="old",
+    )
+
+    assert flow._is_query_echo_hit(echo, query) is True
+    assert flow._is_query_echo_hit(useful, query) is False

@@ -26,6 +26,7 @@ import json
 import re
 from pathlib import Path
 
+import httpx
 from pydantic import BaseModel, Field
 
 from gateway import LLM, embed as _gateway_embed, ensure_gateway
@@ -83,8 +84,23 @@ def _try_embed(text: str, task_type: str) -> list[float] | None:
         resp = _gateway_embed(text, task_type=task_type)
         return list(resp["embedding"])
     except Exception as e:
-        print(f"[memory] embedding failed ({e!r}); item written without vector")
+        print(f"[memory] embedding failed ({_embed_error_detail(e)}); item written without vector")
         return None
+
+
+def _embed_error_detail(exc: Exception) -> str:
+    """Include gateway response bodies, where httpx exposes them."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        response_text = exc.response.text.strip()
+        detail = repr(exc)
+        if response_text:
+            detail += f"; response={response_text[:1000]}"
+        return detail
+    response = getattr(exc, "response", None)
+    response_text = getattr(response, "text", None)
+    if isinstance(response_text, str) and response_text.strip():
+        return f"{exc!r}; response={response_text.strip()[:1000]}"
+    return repr(exc)
 
 
 # ── keyword search (Session 6 path, used as fallback) ───────────────────────

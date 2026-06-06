@@ -322,25 +322,33 @@ async def run_skill(skill: Skill, node_id: str, graph_nodes,
         # per skill invocation, dispatches each tool_call the model emits,
         # and feeds the results back until the model produces final text.
         from mcp_runner import run_with_tools
-        reply = await run_with_tools(
-            prompt=rendered,
-            tools_payload=tools,
-            agent=skill.name,
-            session_id=session_id,
-            provider_pin=skill.provider_pin,
-            max_tokens=skill.max_tokens,
-            temperature=skill.temperature,
-        )
+        try:
+            reply = await run_with_tools(
+                prompt=rendered,
+                tools_payload=tools,
+                agent=skill.name,
+                session_id=session_id,
+                provider_pin=skill.provider_pin,
+                max_tokens=skill.max_tokens,
+                temperature=skill.temperature,
+            )
+        except Exception as e:
+            setattr(e, "prompt_sent", rendered)
+            raise
     else:
-        reply = await asyncio.to_thread(
-            LLM().chat,
-            prompt=rendered,
-            agent=skill.name,
-            session=session_id,
-            provider=skill.provider_pin,
-            max_tokens=skill.max_tokens,
-            temperature=skill.temperature,
-        )
+        try:
+            reply = await asyncio.to_thread(
+                LLM().chat,
+                prompt=rendered,
+                agent=skill.name,
+                session=session_id,
+                provider=skill.provider_pin,
+                max_tokens=skill.max_tokens,
+                temperature=skill.temperature,
+            )
+        except Exception as e:
+            setattr(e, "prompt_sent", rendered)
+            raise
     parsed = parse_skill_json(reply.get("text", ""))
 
     # Lift orchestrator-recognised fields out of the skill's JSON.

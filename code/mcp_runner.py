@@ -32,10 +32,15 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from diagnostics import format_exception
 from gateway import LLM
 
 MCP_SERVER = Path(__file__).parent / "mcp_server.py"
 MAX_TOOL_HOPS = 6  # hard cap so a model that loves tool-use can't cost a fortune
+
+
+class ToolLoopError(RuntimeError):
+    """Raised when the MCP tool loop fails outside an individual tool call."""
 
 
 async def _dispatch_tool(session: ClientSession, name: str, args: dict) -> str:
@@ -64,32 +69,47 @@ async def run_with_tools(*, prompt: str, tools_payload: list[dict],
     last_reply: dict = {}
 
     server_params = StdioServerParameters(command=sys.executable, args=[str(MCP_SERVER)])
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as mcp:
-            await mcp.initialize()
-            for _ in range(MAX_TOOL_HOPS + 1):
-                reply = await _chat(messages=messages, tools=tools_payload,
-                                    agent=agent, session_id=session_id,
-                                    provider_pin=provider_pin,
-                                    max_tokens=max_tokens, temperature=temperature)
-                last_reply = reply
-                tool_calls = reply.get("tool_calls") or []
-                if not tool_calls:
-                    return reply
-                # Carry the assistant's tool-call turn back through.
-                messages.append({
-                    "role": "assistant",
-                    "content": reply.get("text", "") or "",
-                    "tool_calls": tool_calls,
-                })
-                for tc in tool_calls:
-                    result_text = await _dispatch_tool(mcp, tc["name"],
-                                                      tc.get("arguments") or {})
+    phase = "mcp_stdio"
+    final_reply: dict | None = None
+    try:
+        async with stdio_client(server_params) as (read, write):
+            phase = "mcp_session"
+            async with ClientSession(read, write) as mcp:
+                phase = "mcp_initialize"
+                await mcp.initialize()
+                for _ in range(MAX_TOOL_HOPS + 1):
+                    phase = "gateway_chat"
+                    reply = await _chat(messages=messages, tools=tools_payload,
+                                        agent=agent, session_id=session_id,
+                                        provider_pin=provider_pin,
+                                        max_tokens=max_tokens, temperature=temperature)
+                    last_reply = reply
+                    tool_calls = reply.get("tool_calls") or []
+                    if not tool_calls:
+                        final_reply = reply
+                        phase = "mcp_shutdown"
+                        break
+                    # Carry the assistant's tool-call turn back through.
                     messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": result_text[:8_000],  # cap per-tool reply
+                        "role": "assistant",
+                        "content": reply.get("text", "") or "",
+                        "tool_calls": tool_calls,
                     })
+                    for tc in tool_calls:
+                        phase = f"tool_dispatch:{tc.get('name', '<unknown>')}"
+                        result_text = await _dispatch_tool(mcp, tc["name"],
+                                                          tc.get("arguments") or {})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": result_text[:8_000],  # cap per-tool reply
+                        })
+                phase = "mcp_shutdown"
+    except Exception as exc:
+        detail = format_exception(exc, include_traceback=False)
+        raise ToolLoopError(f"mcp tool loop failed during {phase}: {detail}") from exc
+    if final_reply is not None:
+        return final_reply
     # Hit the hop cap. Return whatever the gateway last said.
     return last_reply
 
