@@ -1,0 +1,21 @@
+# secrets / env
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# runtime state / generated data
+state/
+sandbox/
+usage.json
+logs/
+*.db
+
+# IDE / OS
+.idea/
+.DS_Store
