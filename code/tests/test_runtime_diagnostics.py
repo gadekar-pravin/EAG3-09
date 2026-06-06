@@ -15,19 +15,72 @@ import flow
 import mcp_runner
 import memory
 import skills
-from schemas import MemoryItem
+from schemas import AgentResult, MemoryItem, NodeSpec
 
 GATEWAY_CLIENT = Path(__file__).resolve().parents[2] / "llm_gatewayV9" / "client.py"
 
 
 class _Store:
+    def write_query(self, *_args, **_kwargs) -> None:
+        return None
+
+    def write_graph(self, *_args, **_kwargs) -> None:
+        return None
+
     def write_node(self, *_args, **_kwargs) -> None:
         return None
+
+    def read_graph(self):
+        return None
+
+    def read_query(self) -> str:
+        return ""
 
 
 class _Registry:
     def get(self, name: str):
-        return type("Skill", (), {"name": name})()
+        return type(
+            "Skill",
+            (),
+            {"name": name, "internal_successors": [], "critic": False},
+        )()
+
+
+@pytest.mark.asyncio
+async def test_final_cli_print_includes_full_formatter_answer(monkeypatch, capsys) -> None:
+    long_answer = ("A" * 650) + "TAIL_MARKER"
+
+    async def fake_run_one(_self, nid, graph, *_args, **_kwargs):
+        skill = graph.g.nodes[nid]["skill"]
+        if skill == "planner":
+            result = AgentResult(
+                success=True,
+                agent_name="planner",
+                output={"rationale": "test"},
+                successors=[
+                    NodeSpec(skill="formatter", inputs=["USER_QUERY"]),
+                ],
+            )
+        else:
+            result = AgentResult(
+                success=True,
+                agent_name="formatter",
+                output={"final_answer": long_answer},
+            )
+        return nid, result, "prompt"
+
+    executor = flow.Executor.__new__(flow.Executor)
+    executor.registry = _Registry()
+    monkeypatch.setattr(flow, "SessionStore", lambda _sid: _Store())
+    monkeypatch.setattr(flow.memory_svc, "read", lambda _query: [])
+    monkeypatch.setattr(flow.Executor, "_run_one", fake_run_one)
+
+    returned = await executor.run("question", session_id="sid")
+
+    assert returned == long_answer
+    out = capsys.readouterr().out
+    assert "FINAL: " + long_answer in out
+    assert "TAIL_MARKER" in out
 
 
 @pytest.mark.asyncio

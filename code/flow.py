@@ -340,7 +340,7 @@ class Executor:
                   f"The final answer reflects missing data from these "
                   f"branches because the Critic rejected the re-planned "
                   f"output too.")
-        print(f"\n{'═' * 78}\nFINAL: {(formatter_answer or '')[:600]}\n{'═' * 78}\n")
+        print(f"\n{'═' * 78}\nFINAL: {formatter_answer or ''}\n{'═' * 78}\n")
         return formatter_answer or ""
 
     async def _run_one(self, nid: str, graph: Graph, sid: str, query: str,
