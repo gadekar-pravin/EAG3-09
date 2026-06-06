@@ -109,6 +109,15 @@ def test_plan_recovery_upstream_failure_replans() -> None:
     assert "researcher" in d.failure_report
 
 
+def test_plan_recovery_retriever_miss_replans() -> None:
+    d = plan_recovery(failed_skill="retriever",
+                      error_text="retriever found no relevant knowledge",
+                      failed_node_id="n:2")
+    assert d.action == "replan"
+    assert d.reason == "upstream_failure"
+    assert d.failure_report and "retriever" in d.failure_report
+
+
 # ── Critic-fail splice tests (review round-3 #3) ────────────────────────────
 #
 # The end-to-end haiku run did exercise the Critic node, but the Critic

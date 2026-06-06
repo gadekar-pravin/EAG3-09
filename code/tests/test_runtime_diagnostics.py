@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import networkx as nx
@@ -13,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import flow
 import mcp_runner
 import memory
+import skills
 from schemas import MemoryItem
 
 GATEWAY_CLIENT = Path(__file__).resolve().parents[2] / "llm_gatewayV9" / "client.py"
@@ -211,7 +213,7 @@ def test_memory_embed_failure_logs_gateway_body_and_keyword_fallback(
     assert "item written without vector" in out
 
 
-def test_query_echo_memory_hits_are_filtered_before_prompting() -> None:
+def test_query_echo_memory_hits_are_filtered_from_memory_read(monkeypatch) -> None:
     query = "When was Claude Shannon born and when did he die?"
     echo = MemoryItem(
         id="mem:echo",
@@ -230,5 +232,43 @@ def test_query_echo_memory_hits_are_filtered_before_prompting() -> None:
         run_id="old",
     )
 
-    assert flow._is_query_echo_hit(echo, query) is True
-    assert flow._is_query_echo_hit(useful, query) is False
+    monkeypatch.setattr(memory, "_try_embed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(memory, "_load", lambda: [echo, useful])
+
+    assert memory.read(query, top_k=5) == [useful]
+
+
+@pytest.mark.asyncio
+async def test_retriever_found_false_is_recoverable_failure(monkeypatch) -> None:
+    async def fake_run_with_tools(**_kwargs):
+        return {
+            "provider": "github",
+            "text": '{"found": false, "chunks": [], "summary": "no local hit"}',
+        }
+
+    monkeypatch.setattr(mcp_runner, "run_with_tools", fake_run_with_tools)
+    skill = SimpleNamespace(
+        name="retriever",
+        tools_allowed=["search_knowledge"],
+        provider_pin=None,
+        max_tokens=1200,
+        temperature=0.2,
+        prompt_template=lambda: "Retriever prompt",
+    )
+    graph = nx.DiGraph()
+    graph.add_node("n:1", inputs=["USER_QUERY"], metadata={})
+
+    result, prompt = await skills.run_skill(
+        skill,
+        "n:1",
+        graph.nodes,
+        "sid",
+        "When was Claude Shannon born and when did he die?",
+        None,
+    )
+
+    assert prompt.startswith("Retriever prompt")
+    assert result.success is False
+    assert result.agent_name == "retriever"
+    assert result.output["found"] is False
+    assert result.error == "retriever found no relevant knowledge"

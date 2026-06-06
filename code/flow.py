@@ -33,21 +33,6 @@ from skills import SkillRegistry, run_skill
 MAX_NODES = 60  # hard cap so a Planner loop cannot grow forever
 
 
-def _is_query_echo_hit(item, query: str) -> bool:
-    """Ignore memory hits that only mirror the current user query.
-
-    The memory classifier can turn a user question into a fact-like descriptor
-    ("Birth and death dates of X") while storing only the raw question as the
-    value. Feeding those echo hits back to Planner makes them look like answers.
-    """
-    raw = ((getattr(item, "value", {}) or {}).get("raw") or "").strip()
-    return (
-        getattr(item, "source", "") == "user_query"
-        and bool(raw)
-        and raw.casefold() == query.strip().casefold()
-    )
-
-
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 class Graph:
@@ -234,16 +219,13 @@ class Executor:
         # skill's prompt. The S7 contract is that every cognitive role sees
         # memory; carrying that forward verbatim here is what makes S7's
         # indexing investment continue to pay off in S8.
-        memory_hits = [
-            h for h in (memory_svc.read(query) or [])
-            if not _is_query_echo_hit(h, query)
-        ]
+        memory_hits = memory_svc.read(query) or []
         if memory_hits:
             print(f"[memory.read] {len(memory_hits)} hit(s) visible to every skill this run")
-        try:
-            memory_svc.remember(query, source="user_query", run_id=sid)
-        except Exception as e:
-            print(f"[memory.remember] skipped: {e!r}")
+        # The session query is already persisted through SessionStore. Do not
+        # write it into semantic Memory: user questions are not answer-bearing
+        # facts, and embedding them can both pollute retrieval and trigger
+        # immediate embedder cooldowns before the run has done useful work.
 
         formatter_answer: str | None = None
         executed_count = 0

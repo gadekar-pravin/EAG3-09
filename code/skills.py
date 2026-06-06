@@ -350,6 +350,15 @@ async def run_skill(skill: Skill, node_id: str, graph_nodes,
             setattr(e, "prompt_sent", rendered)
             raise
     parsed = parse_skill_json(reply.get("text", ""))
+    if skill.name == "retriever" and parsed.get("found") is False:
+        return AgentResult(
+            success=False,
+            agent_name=skill.name,
+            output=parsed,
+            elapsed_s=time.time() - started,
+            provider=reply.get("provider", ""),
+            error="retriever found no relevant knowledge",
+        ), rendered
 
     # Lift orchestrator-recognised fields out of the skill's JSON.
     # NOTES_RUNS feedback P0 #1: malformed successors used to be silently

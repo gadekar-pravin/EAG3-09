@@ -143,6 +143,23 @@ def _keyword_search(
     return [i for _, i in scored[:top_k]]
 
 
+def _is_query_echo_hit(item: MemoryItem, query: str) -> bool:
+    """True when a memory item only mirrors the current user query.
+
+    Older runs wrote raw user questions through the semantic fact classifier,
+    which produced convincing descriptors such as "Birth and death dates of
+    Claude Shannon" while storing only the question text as `value.raw`.
+    Those records are useful for replay, but they must not be treated as
+    answer-bearing knowledge.
+    """
+    raw = ((item.value or {}).get("raw") or "").strip()
+    return (
+        item.source == "user_query"
+        and bool(raw)
+        and raw.casefold() == query.strip().casefold()
+    )
+
+
 # ── vector search (the new S7 path) ─────────────────────────────────────────
 
 def _vector_search(
@@ -168,6 +185,8 @@ def _vector_search(
             continue
         if kinds and item.kind not in kinds:
             continue
+        if _is_query_echo_hit(item, query):
+            continue
         out.append(item)
         if len(out) >= top_k:
             break
@@ -185,7 +204,10 @@ def read(
     vec_hits = _vector_search(query, kinds=kinds, top_k=top_k)
     if vec_hits:
         return vec_hits
-    return _keyword_search(query, history, kinds=kinds, top_k=top_k)
+    return [
+        item for item in _keyword_search(query, history, kinds=kinds, top_k=top_k)
+        if not _is_query_echo_hit(item, query)
+    ][:top_k]
 
 
 # ── writes ──────────────────────────────────────────────────────────────────
