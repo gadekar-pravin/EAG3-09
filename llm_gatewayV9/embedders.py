@@ -43,6 +43,22 @@ BACKOFF_STEPS = [5, 10, 15]  # seconds per step
 MAX_EMBED_RETRIES = 3
 
 
+def _env_int(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            return int(raw.replace("_", ""))
+    return default
+
+
+def _env_float(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            return float(raw)
+    return default
+
+
 class EmbedderError(Exception):
     def __init__(self, msg: str, status: int | None = None):
         super().__init__(msg)
@@ -81,7 +97,7 @@ class EmbedRateState:
             return False, f"backoff: {self.unavailable_reason} ({self.unavailable_until - now:.0f}s left)"
         if self.cooldown > 0:
             wait = self.cooldown - (now - self.last_call)
-            if wait > 0:
+            if wait > 0.05:
                 return False, f"cooldown ({wait:.1f}s)"
         if self.rpm > 0 and len(self.calls_minute) >= self.rpm:
             return False, f"RPM limit ({self.rpm}/min)"
@@ -190,28 +206,22 @@ class GeminiEmbedder(EmbeddingProvider):
 def build_embedders() -> tuple[list[EmbeddingProvider], list[str]]:
     """Return (ordered list of available embedders, ordered list of names).
 
-    Order is read from EMBED_ORDER env var (comma-separated names) and defaults
-    to ['ollama', '<fallback>']. An embedder is included only if its
-    prerequisites are satisfied (Ollama URL reachable in principle is not
-    checked here; an unset GEMINI_API_KEY drops the fallback).
+    Non-Gemini embedder classes remain for rollback, but this runtime only
+    registers Gemini and ignores stale EMBED_ORDER values.
     """
-    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-    ollama_model = os.getenv("EMBED_OLLAMA_MODEL", "nomic-embed-text")
-
-    fallback_provider = os.getenv("EMBED_FALLBACK_PROVIDER", "gemini").lower()
     fallback_model = os.getenv("EMBED_FALLBACK_MODEL", "gemini-embedding-001")
 
-    registry: dict[str, EmbeddingProvider] = {
-        "ollama": OllamaEmbedder(ollama_model, ollama_url),
-    }
-    if fallback_provider == "gemini":
-        key = os.getenv("GEMINI_API_KEY")
-        if key:
-            registry["gemini"] = GeminiEmbedder(key, fallback_model)
+    registry: dict[str, EmbeddingProvider] = {}
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        rpm = _env_int(("EMBED_GEMINI_RPM", "GEMINI_EMBED_RPM", "GEMINI_RPM"), 5)
+        cooldown = _env_float(
+            ("EMBED_GEMINI_COOLDOWN", "GEMINI_EMBED_COOLDOWN"),
+            0.0 if rpm <= 0 else 60 / rpm,
+        )
+        registry["gemini"] = GeminiEmbedder(key, fallback_model, rpm=rpm, cooldown=cooldown)
 
-    default_order = ["ollama", fallback_provider]
-    order_env = os.getenv("EMBED_ORDER", ",".join(default_order))
-    order = [n.strip() for n in order_env.split(",") if n.strip()]
+    order = ["gemini"]
     embedders = [registry[n] for n in order if n in registry]
     return embedders, [e.name for e in embedders]
 

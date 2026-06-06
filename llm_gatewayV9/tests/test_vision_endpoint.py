@@ -3,6 +3,8 @@ expects {"left":"red","right":"blue"} parsed structured output."""
 import base64, struct, zlib, json
 import httpx
 
+__test__ = False
+
 GW = "http://localhost:8109"
 
 
@@ -30,25 +32,30 @@ schema = {
     "additionalProperties": False,
 }
 
-body = {
-    "image": f"data:image/png;base64,{base64.b64encode(make_png()).decode()}",
-    "prompt": "Name the color on the left half and the color on the right half.",
-    "schema": schema,
-    "schema_name": "Halves",
-    "agent": "v9_vision_endpoint_smoke",
-}
+def main() -> None:
+    body = {
+        "image": f"data:image/png;base64,{base64.b64encode(make_png()).decode()}",
+        "prompt": "Name the color on the left half and the color on the right half.",
+        "schema": schema,
+        "schema_name": "Halves",
+        "agent": "v9_vision_endpoint_smoke",
+    }
 
-with httpx.Client(timeout=60) as c:
-    r = c.post(f"{GW}/v1/vision", json=body)
-    r.raise_for_status()
-    out = r.json()
+    with httpx.Client(timeout=60) as c:
+        r = c.post(f"{GW}/v1/vision", json=body)
+        r.raise_for_status()
+        out = r.json()
 
-print("provider:", out["provider"], "/ model:", out["model"], "/ latency:", out["latency_ms"], "ms")
-print("text    :", out["text"])
-print("parsed  :", json.dumps(out["parsed"], indent=2))
-print("usage   :", out["input_tokens"], "in /", out["output_tokens"], "out")
+    print("provider:", out["provider"], "/ model:", out["model"], "/ latency:", out["latency_ms"], "ms")
+    print("text    :", out["text"])
+    print("parsed  :", json.dumps(out["parsed"], indent=2))
+    print("usage   :", out["input_tokens"], "in /", out["output_tokens"], "out")
 
-assert out["parsed"], "parsed should be populated when schema is given"
-assert out["parsed"]["left"].lower().startswith("red"), out["parsed"]
-assert out["parsed"]["right"].lower().startswith("blue"), out["parsed"]
-print("\n[PASS]")
+    assert out["parsed"], "parsed should be populated when schema is given"
+    assert out["parsed"]["left"].lower().startswith("red"), out["parsed"]
+    assert out["parsed"]["right"].lower().startswith("blue"), out["parsed"]
+    print("\n[PASS]")
+
+
+if __name__ == "__main__":
+    main()

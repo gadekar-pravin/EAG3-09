@@ -42,7 +42,7 @@
 </header>
 <main>
 
-<p>This service routes LLM calls across <strong>seven free providers</strong>, with automatic failover, rate-limit tracking, persistent logging, and a manual override. Below: how to use it, what each provider offers, and how to get free keys.</p>
+<p>This service runs a <strong>Gemini-only</strong> Session 9 runtime, with rate-limit tracking, persistent logging, deterministic token-count routing, chat, vision, and embeddings. Non-Gemini adapters remain in code for rollback but are not registered at startup.</p>
 
 <h2>Using the gateway</h2>
 
@@ -52,8 +52,7 @@
 # one-shot
 print(ask("Explain transformers in 3 lines"))
 
-# explicit provider (shortcut keys: g, n, o, gr, c, or, gh)
-print(ask("hi", provider="gr"))   # groq
+# explicit provider (shortcut keys: g, gem, gemini)
 print(ask("hi", provider="g"))    # gemini
 
 # full client
@@ -66,7 +65,7 @@ for chunk in llm.stream("count to 5"):
     print(chunk, end="", flush=True)</code></pre>
 
 <h3>HTTP (OpenAI-style)</h3>
-<pre><code>curl http://localhost:8099/v1/chat \
+<pre><code>curl http://localhost:8109/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt": "hello", "provider": "g", "max_tokens": 128}'</code></pre>
 
@@ -74,14 +73,8 @@ for chunk in llm.stream("count to 5"):
 <table>
   <tr><th>Key</th><th>Provider</th><th>Aliases</th></tr>
   <tr><td><code>g</code></td><td>Gemini</td><td><code>gem</code>, <code>gemini</code></td></tr>
-  <tr><td><code>n</code></td><td>NVIDIA NIM</td><td><code>nv</code>, <code>nvidia</code></td></tr>
-  <tr><td><code>o</code></td><td>Ollama (local)</td><td><code>oll</code>, <code>ollama</code></td></tr>
-  <tr><td><code>gr</code></td><td>Groq</td><td><code>groq</code></td></tr>
-  <tr><td><code>c</code></td><td>Cerebras</td><td><code>cer</code>, <code>cerebras</code></td></tr>
-  <tr><td><code>or</code></td><td>OpenRouter</td><td><code>opr</code>, <code>openrouter</code></td></tr>
-  <tr><td><code>gh</code></td><td>GitHub Models</td><td><code>ghb</code>, <code>github</code></td></tr>
 </table>
-<p>Without <code>provider</code>, the gateway tries them in failover order (configurable via <code>LLM_ORDER</code> in <code>.env</code>). Explicit provider = no failover (errors surface immediately).</p>
+<p>Without <code>provider</code>, the gateway uses Gemini. Explicit non-Gemini provider names are rejected because only Gemini is registered in the active runtime.</p>
 
 <h2>Provider overview</h2>
 
@@ -89,7 +82,7 @@ for chunk in llm.stream("count to 5"):
 <ul>
   <li>Best models: <code>gemini-3.1-pro-preview</code>, <code>gemini-3.1-flash-lite-preview</code> <span class="star">★ default</span>, <code>gemini-2.5-flash</code>, <code>gemini-2.5-pro</code></li>
   <li>Context: <strong>1M tokens in / 65K out</strong></li>
-  <li>Free tier (Flash-Lite): ~15 RPM · 250K TPM · 1,000 RPD</li>
+  <li>Configure local caps with <code>GEMINI_RPM</code>, <code>GEMINI_TPM</code>, and <code>GEMINI_RPD</code></li>
   <li>Pro models: 5 RPM · 25 RPD <span class="warn">(very tight)</span></li>
 </ul>
 <p><b>Get a key:</b></p>
@@ -99,6 +92,9 @@ for chunk in llm.stream("count to 5"):
   <li>Click <strong>Create API key</strong> → pick or create a project → copy the <code>AIza…</code> key</li>
   <li>No credit card required for free tier</li>
 </ol>
+
+<h3>Dormant rollback adapters</h3>
+<p>NVIDIA, Groq, Cerebras, OpenRouter, GitHub, and Ollama adapter code still exists in the repository, but V9 does not register those providers at startup.</p>
 
 <h3>2. NVIDIA NIM (build.nvidia.com)</h3>
 <ul>
@@ -215,30 +211,19 @@ for chunk in llm.stream("count to 5"):
 </table>
 
 <h2>Configuration (.env)</h2>
-<p>The gateway reads from <code>EAGV3/.env</code>. All keys are optional — providers without keys are skipped.</p>
+<p>The gateway reads from <code>code/.env</code>. The active runtime requires Gemini for chat, vision, and embeddings.</p>
 <pre><code>GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-3.1-flash-lite-preview
+GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_RPM=4000
+GEMINI_RPD=150000
+GEMINI_TPM=1000000
 
-NVIDIA_API_KEY=...
-NVIDIA_MODEL=deepseek-ai/deepseek-v3.2
+EMBED_ORDER=gemini
+EMBED_FALLBACK_MODEL=gemini-embedding-001
+EMBED_GEMINI_RPM=3000
+EMBED_GEMINI_COOLDOWN=0
 
-GROQ_API_KEY=...
-GROQ_MODEL=llama-3.3-70b-versatile
-
-CEREBRAS_API_KEY=...
-CEREBRAS_MODEL=zai-glm-4.7
-
-OPEN_ROUTER_API_KEY=...
-OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
-
-GITHUB_ACCESS_TOKEN=...
-GITHUB_MODEL=openai/gpt-4.1-mini
-
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=gemma4:31b
-
-LLM_ORDER=ollama,gemini,nvidia,groq,cerebras,openrouter,github
-GATEWAY_PORT=8099</code></pre>
+GATEWAY_V9_PORT=8109</code></pre>
 
 <h2>HTTP API reference</h2>
 <table>
@@ -251,20 +236,18 @@ GATEWAY_PORT=8099</code></pre>
   <tr><td>GET</td><td><code>/help</code></td><td>This page</td></tr>
 </table>
 
-<h2>How failover works</h2>
+<h2>How routing works</h2>
 <ol>
   <li>Caller sends request (with or without <code>provider</code>).</li>
-  <li>Router estimates token usage from prompt length.</li>
-  <li>Walks providers in <code>LLM_ORDER</code>, skipping any that:
+  <li><code>auto_route</code> uses a deterministic token-count classifier; no router LLM calls are made.</li>
+  <li>The worker router considers Gemini only, skipping it if:
     <ul>
-      <li>Are inside their per-provider cooldown window (cooldown = 60/RPM)</li>
-      <li>Have hit RPM, RPD, TPM, or daily token cap</li>
-      <li>Have a <code>max_ctx</code> smaller than the prompt</li>
+      <li>It is inside its cooldown window (cooldown = 60/RPM)</li>
+      <li>It has hit RPM, RPD, TPM, or daily token cap</li>
+      <li>Its <code>max_ctx</code> is smaller than the prompt</li>
     </ul>
   </li>
-  <li>First eligible provider gets the call. On 5xx / timeout / 429 → moves to next.</li>
-  <li>If <code>provider=...</code> was explicitly set, no failover — error surfaces.</li>
-  <li>Every call (success or fail) is logged to <code>gateway.db</code> with provider, model, tokens, latency, status.</li>
+  <li>Every call (success or fail) is logged to the gateway database with provider, model, tokens, latency, status.</li>
 </ol>
 
 </main>

@@ -13,6 +13,9 @@ from copy import deepcopy
 import httpx
 
 
+MIN_ENFORCED_COOLDOWN_WAIT = 0.05
+
+
 DEFAULT_LIMITS = {
     "ollama":     {"rpm": 0,    "rpd": 0,       "tpm": 0,        "max_ctx": 32000},
     "cerebras":   {"rpm": 30,   "rpd": 9999,    "tpm": 60000,    "max_ctx": 8000,    "tokens_per_day": 1_000_000},
@@ -178,7 +181,7 @@ class RateState:
             return False, f"backoff: {self.unavailable_reason} ({self.unavailable_until - now:.0f}s left)"
         cooldown = limits.get("cooldown", 0)
         wait = cooldown - (now - self.last_call)
-        if wait > 0:
+        if wait > MIN_ENFORCED_COOLDOWN_WAIT:
             return False, f"cooldown ({wait:.1f}s)"
         rpm = limits.get("rpm", 0)
         if rpm > 0 and len(self.calls_minute) >= rpm:

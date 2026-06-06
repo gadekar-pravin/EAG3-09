@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Per-provider matrix test for llm_gatewayV2.
+"""Manual provider matrix smoke test for llm_gatewayV9.
 
 Tests A (basic), B (tools), C (structured), D (caching), E (reasoning)
-against each of the 7 providers. Prints a matrix at the end.
+against the active Gemini-only runtime. Prints a matrix at the end.
 
-Assumes V2 is running at http://localhost:8100 (env LLM_GATEWAY_V2_URL to override).
+Assumes V9 is running at http://localhost:8109 (env LLM_GATEWAY_V9_URL to override).
 """
 from __future__ import annotations
 import os, sys, json, time, httpx
 
-URL = os.getenv("LLM_GATEWAY_V2_URL", "http://localhost:8100")
-PROVIDERS = ["o", "g", "n", "gr", "c", "or", "gh"]
-PROVIDER_NAMES = {"o":"ollama","g":"gemini","n":"nvidia","gr":"groq","c":"cerebras","or":"openrouter","gh":"github"}
+__test__ = False
+
+URL = os.getenv("LLM_GATEWAY_V9_URL", "http://localhost:8109")
+PROVIDERS = ["g"]
+PROVIDER_NAMES = {"g": "gemini"}
 
 ADD_TOOL = {
     "name": "add",
@@ -178,7 +180,7 @@ def main():
     import concurrent.futures as cf
     matrix = {}
     all_details = {}
-    print("Running all 7 providers in parallel...\n", flush=True)
+    print("Running Gemini provider smoke matrix...\n", flush=True)
     with cf.ThreadPoolExecutor(max_workers=7) as ex:
         futs = {ex.submit(run_provider, p): p for p in PROVIDERS}
         for fut in cf.as_completed(futs):

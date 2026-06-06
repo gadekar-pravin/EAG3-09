@@ -961,27 +961,14 @@ def model_capabilities(provider_name: str, model: str, default_caps: dict) -> di
 
 
 def build_providers(cache_store):
-    """Worker pool — the LLMs that do real work for the agent.
+    """Worker pool — Gemini-only runtime.
 
-    V3 changes vs V2:
-    - cerebras worker default: zai-glm-4.7 (was qwen-3-235b-a22b-instruct-2507, deprecating May 27 2026)
-    - groq worker default: openai/gpt-oss-120b (was llama-3.3-70b-versatile, now moved to router pool)
+    Non-Gemini adapter classes remain in this module for rollback, but the
+    active Session 9 gateway intentionally ignores their env keys.
     """
     out = {}
     if k := os.getenv("GEMINI_API_KEY"):
         out["gemini"] = GeminiProvider(k, os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), cache_store)
-    if k := os.getenv("NVIDIA_API_KEY"):
-        out["nvidia"] = NvidiaProvider(k, os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-v3.2"))
-    if k := os.getenv("GROQ_API_KEY"):
-        out["groq"] = GroqProvider(k, os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
-    if k := os.getenv("CEREBRAS_API_KEY"):
-        out["cerebras"] = CerebrasProvider(k, os.getenv("CEREBRAS_MODEL", "zai-glm-4.7"))
-    if k := os.getenv("OPEN_ROUTER_API_KEY"):
-        out["openrouter"] = OpenRouterProvider(k, os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"))
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
-        out["github"] = GitHubProvider(k, os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini"))
-    if om := os.getenv("OLLAMA_MODEL"):
-        out["ollama"] = OllamaProvider(om, os.getenv("OLLAMA_URL", "http://localhost:11434"))
     # V9: bake per-model capability overrides (vision/reasoning) into each
     # instance, so Router.pick() — which reads provider.capabilities directly —
     # sees the resolved truth instead of the class-level default.
@@ -1008,18 +995,9 @@ ROUTER_DEFAULTS = {
 
 
 def build_router_providers():
-    """Router pool — same provider classes as workers, but separate instances
-    with router-specific (smaller/faster) model defaults. Uses the same API keys
-    as workers; per-provider rate budgets are independent because the providers
-    we picked (Cerebras, Groq, NVIDIA, GitHub) all meter per-model, not per-key.
+    """Router pool disabled for Gemini-only runtime.
+
+    `main._classify_tier()` will use its deterministic token-count fallback
+    when this factory returns no router providers.
     """
-    out = {}
-    if k := os.getenv("CEREBRAS_API_KEY"):
-        out["cerebras"] = CerebrasProvider(k, os.getenv("ROUTER_CEREBRAS_MODEL", ROUTER_DEFAULTS["cerebras"]))
-    if k := os.getenv("GROQ_API_KEY"):
-        out["groq"] = GroqProvider(k, os.getenv("ROUTER_GROQ_MODEL", ROUTER_DEFAULTS["groq"]))
-    if k := os.getenv("NVIDIA_API_KEY"):
-        out["nvidia"] = NvidiaProvider(k, os.getenv("ROUTER_NVIDIA_MODEL", ROUTER_DEFAULTS["nvidia"]))
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
-        out["github"] = GitHubProvider(k, os.getenv("ROUTER_GITHUB_MODEL", ROUTER_DEFAULTS["github"]))
-    return out
+    return {}

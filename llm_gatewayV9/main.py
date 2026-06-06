@@ -24,9 +24,9 @@ from cache import GeminiCache
 from schemas import ChatRequest, ChatResponse, ToolCall, RouterDecision, EmbedRequest, EmbedResponse, BatchChatRequest, VisionRequest, ResponseFormat
 import embedders as E
 
-DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
-ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
-ROUTER_ORDER = [x.strip() for x in os.getenv("ROUTER_ORDER", ",".join(DEFAULT_ROUTER_ORDER)).split(",") if x.strip()]
+DEFAULT_ORDER = ["gemini"]
+ORDER = list(DEFAULT_ORDER)
+ROUTER_ORDER: list[str] = []
 PORT = int(os.getenv("GATEWAY_V9_PORT", "8109"))
 
 # V8: agent_routing.yaml maps `agent="<name>"` to a preferred provider name.
@@ -45,8 +45,8 @@ if _AGENT_ROUTING_PATH.exists():
 # Tier -> worker failover order. TINY prefers small fast workers; LARGE prefers
 # long-context Gemini; HUGE is rejected (Summarizer Agent will live in V7).
 TIER_TO_ORDER = {
-    "TINY":  ["github", "openrouter", "groq", "nvidia", "cerebras", "gemini", "ollama"],
-    "LARGE": ["gemini", "groq", "nvidia", "cerebras", "github", "openrouter", "ollama"],
+    "TINY":  ["gemini"],
+    "LARGE": ["gemini"],
 }
 
 # Router envelope: cap the sample at ~800 chars (first 400 + last 400).
@@ -794,11 +794,12 @@ async def list_embedders():
 @app.get("/v1/providers")
 async def list_providers():
     r = app.state.router
+    active = list(r.providers.keys())
     return {
         "order": r.order,
-        "providers": list(r.providers.keys()),
-        "shortcuts": SHORTCUTS,
-        "limits": LIMITS,
+        "providers": active,
+        "shortcuts": {k: v for k, v in SHORTCUTS.items() if v in active},
+        "limits": {k: LIMITS[k] for k in active},
         "models": {n: p.model for n, p in r.providers.items()},
     }
 
@@ -825,7 +826,8 @@ async def capabilities():
 async def status():
     r = app.state.router
     return {"order": r.order, "live": r.all_status(),
-            "today": db.aggregate(call_role="worker"), "limits": LIMITS}
+            "today": db.aggregate(call_role="worker"),
+            "limits": {k: LIMITS[k] for k in r.providers}}
 
 
 @app.get("/v1/routers")
