@@ -22,6 +22,25 @@ Output schema (JSON, no prose, no markdown fences):
 Notes:
   - The fields dictionary is the load-bearing output; downstream
     Formatter nodes read it.
+  - For the Hugging Face top-3 text-generation models assignment, emit:
+    {
+      "fields": {
+        "models": [
+          {
+            "rank": 1,
+            "model_id": "...",
+            "likes": "...",
+            "downloads": "...",
+            "description": "...",
+            "model_url": "..."
+          }
+        ]
+      },
+      "rationale": "..."
+    }
+    Include exactly three model records when the Browser input contains
+    three rendered cards. Leave missing likes/downloads/description fields
+    as "unavailable"; do not invent them.
   - When the question is a comparison (`fastest growing`, `largest`),
     emit a `comparison` key with `winner: <id>` and `reason: <short>`.
   - When the question's evidence is missing, set `fields: {}` and put

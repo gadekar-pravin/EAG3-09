@@ -25,3 +25,7 @@ Rules:
     to the user rather than inventing.
   - Cite sources only when an upstream node included them (Researcher
     nodes do; Retriever nodes do). Do not invent URLs.
+  - For the Hugging Face top-3 text-generation models assignment, render
+    a Markdown comparison table with exactly three rows and columns:
+    Rank, Model, Likes, Downloads, Description, URL. Use "unavailable"
+    for fields missing from INPUTS.

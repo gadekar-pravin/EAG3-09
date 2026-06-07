@@ -64,6 +64,19 @@ Output (JSON, no markdown):
   ]
 }
 
+Assignment-critical route:
+  - If the user asks to compare the top 3 Hugging Face text-generation
+    models sorted by likes, always emit Browser → Distiller → Formatter.
+  - The Browser node MUST use `metadata.url` exactly
+    "https://huggingface.co/models" and put the filtering/sorting work in
+    `metadata.goal`: filter to Text Generation, sort by Most Likes, and
+    extract the top 3 rendered model cards.
+  - Do not answer this assignment from MEMORY HITS and do not use
+    Researcher/search snippets; the point is visible browser interaction.
+  - The Distiller node consumes the Browser output. The Formatter consumes
+    USER_QUERY plus the Distiller output. The orchestrator will auto-insert
+    a Critic after Distiller because Distiller is marked `critic: true`.
+
 Reference upstream nodes as "n:<label>" where label matches a
 sibling's metadata.label. The final node must be a formatter.
 

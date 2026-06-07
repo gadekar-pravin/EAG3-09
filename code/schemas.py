@@ -149,11 +149,14 @@ class BrowserOutput(BaseModel):
 
     url: str
     goal: str
-    path: Literal["extract", "deterministic", "a11y", "vision"]
+    path: Literal["extract", "deterministic", "a11y", "vision", "blocked"]
     turns: int = 0
     content: str | None = None
     actions: list[dict] = Field(default_factory=list)
     final_url: str | None = None
+    artifacts_dir: str | None = None
+    page_state_logs: list[str] = Field(default_factory=list)
+    extracted_data: dict = Field(default_factory=dict)
 
 
 class NodeState(BaseModel):

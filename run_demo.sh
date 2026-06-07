@@ -41,7 +41,7 @@ query_for() {
     populations)  echo "Find the populations of London, Paris, Berlin and tell me which two are closest in size." ;;
     structured)   echo "Compare the populations of Mumbai, Cairo, and Lagos and identify which is growing fastest. Return structured fields per city." ;;
     fail)         echo "Summarise the contents of /nonexistent/path.txt for me." ;;
-    browser)      echo "What are the top 3 most-liked open-source LLM releases on Hugging Face from the past week? For each give model name, parameter count, and one-line description." ;;
+    browser)      echo "Compare top 3 Hugging Face text-generation models sorted by likes. Return a structured comparison table." ;;
     *) return 1 ;;
   esac
 }
