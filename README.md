@@ -93,6 +93,8 @@ Two terminals:
 # Terminal 1 — start the gateway (serves :8109)
 cd llm_gatewayV9
 uv run main.py
+# or:
+./run.sh
 
 # Terminal 2 — run the agent on a query
 cd code
@@ -111,6 +113,12 @@ orchestrator feature. Each query's stdout is teed to `logs/<slug>.log`, and the
 script prints the session id plus a one-liner to inspect any node's rendered
 prompt.
 
+Run demo commands from the repo root:
+
+```bash
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09
+```
+
 ```bash
 ./run_demo.sh              # pytest + the 5 canonical queries
 ./run_demo.sh tests        # unit tests only
@@ -123,8 +131,42 @@ prompt.
 ./run_demo.sh wipe         # clear state/sessions + logs
 ```
 
+The default `./run_demo.sh` run covers the non-browser path: unit tests, then
+`hello`, `shannon`, `populations`, `structured`, and `fail`. The Browser demo is
+separate because it needs Playwright Chromium and exercises the Session 9
+Browser skill end-to-end:
+
+```bash
+cd code
+uv run playwright install chromium   # one-time setup for browser demos
+cd ..
+./run_demo.sh browser
+```
+
 Each run writes its log to `logs/<slug>.log` and its full DAG + per-node
 snapshots to `code/state/sessions/<session_id>/`.
+
+If your terminal says `zsh: no such file or directory: ./run_demo.sh`, you are
+not in the repo root. Run:
+
+```bash
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09
+./run_demo.sh
+```
+
+Common terminal flow for live demos:
+
+```bash
+# Terminal 1
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09/llm_gatewayV9
+./run.sh
+
+# Terminal 2
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09
+./run_demo.sh
+# or, for the Browser skill:
+./run_demo.sh browser
+```
 
 ## Testing
 
