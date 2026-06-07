@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from lxml import html as lxml_html
 
@@ -31,6 +31,32 @@ _MODEL_PATH_RE = re.compile(r"^/([^/\s?#]+/[^/\s?#]+)")
 _COUNT = r"\d[\d,]*(?:\.\d+)?\s*[kKmM]?"
 _LIKES_RE = re.compile(rf"(?P<num>{_COUNT})\s*(?:likes?|like)", re.I)
 _DOWNLOADS_RE = re.compile(rf"(?P<num>{_COUNT})\s*(?:downloads?|download)", re.I)
+_MODEL_SIGNAL_RE = re.compile(
+    r"\b(?:text-generation|text generation|transformers|safetensors|updated|"
+    r"downloads?|likes?|model card)\b",
+    re.I,
+)
+_NON_MODEL_PREFIXES = {
+    "-",
+    "api",
+    "blog",
+    "chat",
+    "collections",
+    "datasets",
+    "docs",
+    "enterprise",
+    "events",
+    "join",
+    "login",
+    "models",
+    "new",
+    "organizations",
+    "papers",
+    "pricing",
+    "settings",
+    "spaces",
+    "tasks",
+}
 
 
 def is_huggingface_model_comparison(url: str, goal: str) -> bool:
@@ -53,59 +79,135 @@ def _first_match(pattern: re.Pattern[str], text: str) -> str:
     return (m.group("num").strip() if m else "")
 
 
+def _parse_count(value: str) -> float | None:
+    raw = (value or "").strip().lower().replace(",", "")
+    if not raw:
+        return None
+    multiplier = 1.0
+    if raw.endswith("k"):
+        multiplier = 1_000.0
+        raw = raw[:-1]
+    elif raw.endswith("m"):
+        multiplier = 1_000_000.0
+        raw = raw[:-1]
+    try:
+        return float(raw.strip()) * multiplier
+    except ValueError:
+        return None
+
+
+def _is_probable_model_path(path: str) -> bool:
+    parsed = urlparse(path)
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if len(parts) != 2:
+        return False
+    owner, name = parts
+    if owner.lower() in _NON_MODEL_PREFIXES:
+        return False
+    if name.lower() in _NON_MODEL_PREFIXES:
+        return False
+    if "." in owner or owner.startswith((".", "_")):
+        return False
+    return True
+
+
+def _card_container_for(link):
+    for ancestor in link.iterancestors():
+        cls = " ".join(ancestor.get("class", "").split()).lower()
+        role = (ancestor.get("role") or "").lower()
+        tag = ancestor.tag.lower() if isinstance(ancestor.tag, str) else ""
+        if tag in {"article", "li"} or "model" in cls or "card" in cls or role == "listitem":
+            return ancestor
+    return None
+
+
+def _has_model_card_signal(text: str) -> bool:
+    return bool(_LIKES_RE.search(text) or _DOWNLOADS_RE.search(text) or _MODEL_SIGNAL_RE.search(text))
+
+
 def extract_hf_model_cards(html_text: str, *, base_url: str = "https://huggingface.co") -> list[dict]:
     """Extract top rendered HF model cards from HTML.
 
     The helper intentionally parses rendered HTML, not search snippets. It
-    accepts the real Hugging Face card shape and small test fixtures with the
-    same model-link contract.
+    accepts plausible model cards only: two-segment model links inside a card
+    container with model-listing signals nearby.
     """
     root = lxml_html.fromstring(html_text or "<html></html>")
     seen: set[str] = set()
-    cards: list[dict] = []
+    candidates: list[tuple[float, int, dict]] = []
     links = root.xpath('//a[starts-with(@href, "/") or starts-with(@href, "https://huggingface.co/")]')
-    for link in links:
+    for order, link in enumerate(links):
         href = link.get("href") or ""
         if href.startswith("https://huggingface.co/"):
             path = href.replace("https://huggingface.co", "", 1)
         else:
             path = href
         m = _MODEL_PATH_RE.match(path)
-        if not m:
+        if not m or not _is_probable_model_path(path):
             continue
         model_id = m.group(1).strip("/")
         if model_id in seen:
             continue
+
+        container = _card_container_for(link)
+        if container is None:
+            continue
+        text = _text(container)
+        if not _has_model_card_signal(text):
+            continue
         seen.add(model_id)
 
-        container = link
-        for ancestor in link.iterancestors():
-            cls = " ".join(ancestor.get("class", "").split()).lower()
-            role = (ancestor.get("role") or "").lower()
-            tag = ancestor.tag.lower() if isinstance(ancestor.tag, str) else ""
-            if tag in {"article", "li"} or "model" in cls or "card" in cls or role == "listitem":
-                container = ancestor
-                break
-        text = _text(container)
-        if len(text) < len(model_id):
-            text = _text(link)
+        likes = _first_match(_LIKES_RE, text)
+        downloads = _first_match(_DOWNLOADS_RE, text)
         lines = [ln.strip() for ln in re.split(r"\s{2,}|\n", text) if ln.strip()]
         description = ""
         for ln in lines:
             if model_id not in ln and not _LIKES_RE.search(ln) and not _DOWNLOADS_RE.search(ln):
                 description = ln
                 break
-        cards.append({
-            "rank": len(cards) + 1,
+        card = {
+            "rank": 0,
             "model_id": model_id,
             "model_url": urljoin(base_url, "/" + model_id),
-            "likes": _first_match(_LIKES_RE, text),
-            "downloads": _first_match(_DOWNLOADS_RE, text),
+            "likes": likes,
+            "downloads": downloads,
             "description": description,
-        })
-        if len(cards) == 3:
-            break
+        }
+        likes_count = _parse_count(likes)
+        sort_key = likes_count if likes_count is not None else -1.0
+        candidates.append((sort_key, order, card))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    cards = [card for _sort_key, _order, card in candidates[:3]]
+    for rank, card in enumerate(cards, start=1):
+        card["rank"] = rank
     return cards
+
+
+def build_hf_extracted_data(cards: list[dict], final_url: str) -> dict[str, Any]:
+    likes_counts = [_parse_count(card.get("likes", "")) for card in cards]
+    known_likes = [count for count in likes_counts if count is not None]
+    all_likes_parseable = bool(cards) and len(known_likes) == len(cards)
+    descending_likes = all(
+        known_likes[i] >= known_likes[i + 1]
+        for i in range(len(known_likes) - 1)
+    )
+    sort_verified = (
+        "sort=likes" in (final_url or "").lower()
+        and all_likes_parseable
+        and descending_likes
+    )
+    warnings = []
+    if "sort=likes" not in (final_url or "").lower():
+        warnings.append("final URL does not expose sort=likes after selecting Most Likes")
+    if len(known_likes) < len(cards):
+        warnings.append("one or more model cards did not expose a parseable likes count")
+    if not descending_likes:
+        warnings.append("parseable likes counts were not in descending order")
+    return {
+        "models": cards,
+        "sort_verified": sort_verified,
+        "warnings": warnings,
+    }
 
 
 def format_hf_cards_content(cards: list[dict]) -> str:
@@ -216,14 +318,15 @@ async def run_huggingface_top_models_recipe(page, *, url: str, artifacts_dir: st
 
     rendered = await page.content()
     cards = extract_hf_model_cards(rendered)
+    extracted_data = build_hf_extracted_data(cards, page.url)
     if len(cards) < 3:
-        return RecipeResult("", actions, page.url, {"models": cards}, logs, str(art_dir) if art_dir else None)
+        return RecipeResult("", actions, page.url, extracted_data, logs, str(art_dir) if art_dir else None)
 
     return RecipeResult(
         content=format_hf_cards_content(cards),
         actions=actions,
         final_url=page.url,
-        extracted_data={"models": cards},
+        extracted_data=extracted_data,
         page_state_logs=logs,
         artifacts_dir=str(art_dir) if art_dir else None,
     )

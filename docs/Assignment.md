@@ -1,11 +1,12 @@
-Assignment: Browser Comparison Agent + Replay Viewer
-Build a browser-capable agent that completes a real comparison task on the web and produces a replay view of the run.
+# Assignment: Browser Comparison Agent + Replay Viewer
 
-The goal is to demonstrate work that Session 8’s web_search + fetch_url cannot reliably do: interacting with dynamic pages, filters, dropdowns, tabs, search forms, product cards, pricing pages, or multi-step workflows. web_search and fetch_url are useful for static pages, but they fail on JavaScript-rendered pages, click-revealed widgets, multi-page flows, and sites where useful data appears only after filtering or sorting.
+## Build a browser-capable agent that completes a real comparison task on the web and produces a replay view of the run.
 
-Students must choose this comparison task: Compare top 3 Hugging Face text-generation models sorted by likes.
+- The goal is to demonstrate work that Session 8’s web_search + fetch_url cannot reliably do: interacting with dynamic pages, filters, dropdowns, tabs, search forms, product cards, pricing pages, or multi-step workflows. web_search and fetch_url are useful for static pages, but they fail on JavaScript-rendered pages, click-revealed widgets, multi-page flows, and sites where useful data appears only after filtering or sorting.
 
-The agent must perform at least three visible browser actions, such as search, filter, sort, open product/detail pages, switch tabs, expand hidden content, or submit a form. Passive scraping from search snippets is not accepted.
+- Students must choose this comparison task: Compare top 3 Hugging Face text-generation models sorted by likes.
+
+- The agent must perform at least three visible browser actions, such as search, filter, sort, open product/detail pages, switch tabs, expand hidden content, or submit a form. Passive scraping from search snippets is not accepted.
 
 The final output must include a structured comparison table and a replay viewer/report showing:
 
@@ -17,41 +18,29 @@ The final output must include a structured comparison table and a replay viewer/
 6. Extracted data
 7. Final comparison table
 8. Turn count and cost summary
+
 The orchestrator must not be modified. Any new behavior must plug in through the skill catalogue or as a Browser skill extension.
 
-User Goal
+```mermaid
+flowchart LR
+    A["User Goal"] --> B["Planner"]
+    B --> C["Researcher<br/>Find candidate URLs"]
+    C --> D["Browser Skill<br/>Interact with website"]
+    D --> E{"Cheapest correct path?"}
 
-Planner
+    E --> F["Extract<br/>Static page"]
+    E --> G["Deterministic<br/>CSS selectors"]
+    E --> H["A11y<br/>Accessibility tree"]
+    E --> I["Vision<br/>Set-of-marks"]
+    E --> J["Gateway Blocked<br/>Recover or report"]
 
-Researcher
-Find candidate URLs
+    F --> K["Distiller"]
+    G --> K
+    H --> K
+    I --> K
+    J --> K
 
-Browser Skill
-Interact with website
-
-Cheapest correct path?
-
-Extract
-Static page
-
-Deterministic
-CSS selectors
-
-A11y
-Accessibility tree
-
-Vision
-Set-of-marks
-
-Gateway Blocked
-Recover or report
-
-Distiller
-
-QA / Critic
-
-Replay Viewer
-
-Final Comparison Table
-
-Submission: GitHub repo, replay trace/log, final comparison output, and a short architecture note. 
+    K --> L["QA / Critic"]
+    L --> M["Replay Viewer"]
+    M --> N["Final Comparison Table"]
+```

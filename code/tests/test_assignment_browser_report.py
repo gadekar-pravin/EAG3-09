@@ -8,7 +8,11 @@ import networkx as nx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import replay
-from browser.recipes import extract_hf_model_cards, format_hf_cards_content
+from browser.recipes import (
+    build_hf_extracted_data,
+    extract_hf_model_cards,
+    format_hf_cards_content,
+)
 from browser.skill import BrowserSkill
 from schemas import AgentResult, NodeState
 
@@ -62,6 +66,83 @@ def test_huggingface_card_extraction_from_rendered_fixture() -> None:
     assert "EXTRACTED_MODEL_CARDS_JSON" in content
     assert cards[0]["likes"] == "12.4k"
     assert cards[1]["downloads"] == "8,888"
+
+
+def test_huggingface_extraction_ignores_distractors_and_sorts_likes() -> None:
+    html = """
+    <body>
+      <nav>
+        <a href="/docs/transformers">Transformers docs</a>
+        <a href="/blog/text-generation">Text generation blog</a>
+        <a href="/datasets/squad">SQuAD dataset</a>
+        <a href="/spaces/demo/text-generation">Demo Space</a>
+        <a href="/models?sort=likes">Models listing</a>
+        <a href="/real/NoCard">12.4k likes outside a card</a>
+      </nav>
+      <main>
+        <article class="model-card">
+          <a href="/beta/Model-B">beta/Model-B</a>
+          <p>Text Generation model for fixtures</p>
+          <span>4k likes</span><span>11k downloads</span>
+        </article>
+        <article class="model-card">
+          <a href="/alpha/Model-A">alpha/Model-A</a>
+          <p>Instruction tuned text-generation model</p>
+          <span>12.4k likes</span><span>1.2M downloads</span>
+        </article>
+        <article class="model-card">
+          <a href="/gamma/Model-C">gamma/Model-C</a>
+          <p>Text Generation model with hidden popularity labels</p>
+        </article>
+      </main>
+    </body>
+    """
+
+    cards = extract_hf_model_cards(html)
+    content = format_hf_cards_content(cards)
+
+    assert len(cards) == 3
+    assert [c["model_id"] for c in cards] == [
+        "alpha/Model-A",
+        "beta/Model-B",
+        "gamma/Model-C",
+    ]
+    assert [c["rank"] for c in cards] == [1, 2, 3]
+    assert all(not c["model_id"].startswith(("docs/", "blog/", "datasets/", "spaces/")) for c in cards)
+    assert cards[2]["likes"] == ""
+    assert cards[2]["downloads"] == ""
+    assert "likes=unavailable" in content
+
+
+def test_huggingface_extraction_reports_sort_verification_metadata() -> None:
+    complete_cards = [
+        {"model_id": "alpha/Model-A", "likes": "12.4k"},
+        {"model_id": "beta/Model-B", "likes": "4k"},
+        {"model_id": "gamma/Model-C", "likes": "900"},
+    ]
+    cards = [
+        {"model_id": "alpha/Model-A", "likes": "12.4k"},
+        {"model_id": "beta/Model-B", "likes": "4k"},
+        {"model_id": "gamma/Model-C", "likes": ""},
+    ]
+
+    data = build_hf_extracted_data(
+        complete_cards,
+        "https://huggingface.co/models?pipeline_tag=text-generation&sort=likes",
+    )
+    assert data["sort_verified"] is True
+    assert data["warnings"] == []
+
+    data = build_hf_extracted_data(
+        cards,
+        "https://huggingface.co/models?pipeline_tag=text-generation&sort=likes",
+    )
+    assert data["sort_verified"] is False
+    assert data["warnings"] == ["one or more model cards did not expose a parseable likes count"]
+
+    data = build_hf_extracted_data(cards, "https://huggingface.co/models")
+    assert data["sort_verified"] is False
+    assert "final URL does not expose sort=likes after selecting Most Likes" in data["warnings"]
 
 
 class _FakeStore:

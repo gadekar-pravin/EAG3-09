@@ -29,13 +29,13 @@ The important constraints are:
 | Assignment requirement | Implementation |
 |---|---|
 | Compare top 3 Hugging Face text-generation models sorted by likes | `run_demo.sh browser` now uses the exact assignment query. `prompts/planner.md` has an assignment-critical route that forces the Browser node to use `https://huggingface.co/models` as the base URL and puts Text Generation plus Most Likes in `metadata.goal`. |
-| Use browser interaction, not snippets | `code/browser/recipes.py` adds a Hugging Face browser recipe that drives the rendered Hugging Face page with Playwright-visible actions, then extracts rendered model cards. `code/browser/skill.py` invokes this recipe before falling back to the generic cascade. |
+| Use browser interaction, not snippets | `code/browser/recipes.py` adds a Hugging Face browser recipe that drives the rendered Hugging Face page with Playwright-visible actions, then extracts rendered model cards. The extractor rejects Hugging Face docs, blog, dataset, space, and navigation links so they cannot be mistaken for model cards. `code/browser/skill.py` invokes this recipe before falling back to the generic cascade. |
 | At least three visible browser actions | The Hugging Face recipe records three actions: click Text Generation, open the Sort menu, and click Most Likes. These are returned in `BrowserOutput.actions`. |
 | Structured comparison table | `prompts/distiller.md` now tells Distiller to emit exactly three Hugging Face model records when the Browser output contains them. `prompts/formatter.md` now tells Formatter to render a Markdown table with Rank, Model, Likes, Downloads, Description, and URL. |
 | Replay/report checklist | `code/replay.py` adds `--report`, which prints the eight assignment sections in Markdown. |
 | Browser path includes blocked | `BrowserOutput.path` in `code/schemas.py` now accepts `blocked`. Gateway-blocked Browser failures return `path="blocked"` plus `error_code="gateway_blocked"`. |
 | Screenshots or page-state logs | The Hugging Face recipe writes per-step screenshots and text state logs under the session Browser artifact directory and surfaces those paths in `BrowserOutput.page_state_logs`. |
-| Extracted data | The recipe stores parsed cards under `BrowserOutput.extracted_data["models"]`, and also formats them into Browser content for downstream Distiller/Formatter nodes. |
+| Extracted data | The recipe stores parsed cards under `BrowserOutput.extracted_data["models"]`, and also formats them into Browser content for downstream Distiller/Formatter nodes. Parsed cards are sorted by normalized likes when likes are visible, while the original likes/download strings are preserved for the final table. |
 | Turn count and cost summary | Browser turns come from `BrowserOutput.turns`; report mode also queries V9 `/v1/cost/by_agent?session=<session_id>` for per-agent calls, tokens, and dollars. |
 | No orchestrator modification | `code/flow.py` is unchanged. The work is contained in Browser skill extension code, typed schema additions, prompts, replay/reporting, demo wiring, and tests. |
 
@@ -46,6 +46,11 @@ The important constraints are:
     task.
   - Parses rendered Hugging Face model cards into rank, model id, likes,
     downloads, description, and URL.
+  - Filters out non-model Hugging Face links before accepting a card candidate.
+  - Normalizes likes/download counts internally so model cards can be ranked by
+    likes without changing the display strings shown to the user.
+  - Adds extracted-data metadata for sort verification and warnings when the
+    final URL or rendered cards do not expose enough likes-sort evidence.
   - Records visible browser actions and page-state artifacts.
 
 - `code/browser/skill.py`
@@ -76,7 +81,8 @@ The important constraints are:
 
 - `code/tests/test_assignment_browser_report.py`
   - Adds regression coverage for the Browser blocked path, Hugging Face card
-    extraction, replay report sections, and Planner prompt guardrails.
+    extraction, distractor-link rejection, likes sorting, replay report
+    sections, and Planner prompt guardrails.
 
 ## Test And Verification Commands
 
@@ -92,7 +98,7 @@ uv run pytest tests/ -q
 Expected result:
 
 ```text
-45 passed
+47 passed
 ```
 
 This covers the assignment-specific tests plus the existing curated regression
@@ -108,7 +114,7 @@ uv run pytest tests/test_assignment_browser_report.py -q
 Expected result:
 
 ```text
-4 passed
+6 passed
 ```
 
 Optional compile check:
@@ -178,6 +184,10 @@ The live run is assignment-complete when the report shows:
   - Lists paths under `code/state/sessions/<session_id>/browser/...`.
 - `## 6. Extracted Data`
   - Contains exactly three model records under `models`.
+  - Shows `sort_verified: true` when Hugging Face exposes `sort=likes` in the
+    final URL and the parseable likes values are descending. If likes are not
+    exposed cleanly, the report should include a warning rather than invented
+    popularity values.
 - `## 7. Final Comparison Table`
   - Contains a Markdown table with three rows.
 - `## 8. Turn Count And Cost Summary`
@@ -214,12 +224,14 @@ During implementation, the following checks passed:
 
 ```bash
 cd code
+uv run pytest tests/test_assignment_browser_report.py -q
 uv run pytest tests/ -q
 uv run python -m py_compile browser/recipes.py browser/skill.py replay.py schemas.py
 cd ..
 git diff --check
 ```
 
-The curated test suite passed with `45 passed`. A live Browser run was not
+The assignment-focused suite passed with `6 passed`, and the curated test suite
+passed with `47 passed`. A live Browser run was not
 performed in that pass because `:8109` reported a bind conflict while HTTP
 probes to the gateway refused connections.
