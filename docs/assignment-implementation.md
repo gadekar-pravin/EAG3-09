@@ -31,8 +31,8 @@ The important constraints are:
 | Compare top 3 Hugging Face text-generation models sorted by likes | `run_demo.sh browser` now uses the exact assignment query. `prompts/planner.md` has an assignment-critical route that forces the Browser node to use `https://huggingface.co/models` as the base URL and puts Text Generation plus Most Likes in `metadata.goal`. |
 | Use browser interaction, not snippets | `code/browser/recipes.py` adds a Hugging Face browser recipe that drives the rendered Hugging Face page with Playwright-visible actions, then extracts rendered model cards. The extractor rejects Hugging Face docs, blog, dataset, space, and navigation links so they cannot be mistaken for model cards. `code/browser/skill.py` invokes this recipe before falling back to the generic cascade. |
 | At least three visible browser actions | The Hugging Face recipe records three actions: click Text Generation, open the Sort menu, and click Most Likes. These are returned in `BrowserOutput.actions`. |
-| Structured comparison table | `prompts/distiller.md` now tells Distiller to emit exactly three Hugging Face model records when the Browser output contains them. `prompts/formatter.md` now tells Formatter to render a Markdown table with Rank, Model, Likes, Downloads, Description, and URL. |
-| Replay/report checklist | `code/replay.py` adds `--report`, which prints the eight assignment sections in Markdown. |
+| Structured comparison table | `prompts/distiller.md` now tells Distiller to emit exactly three Hugging Face model records when the Browser output contains them. `prompts/formatter.md` now tells Formatter to render a Markdown table with Rank, Model, Likes, Downloads, Parameters, Description, and URL. |
+| Replay/report checklist | `code/replay.py` adds `--report`, which prints the eight assignment sections in Markdown, and `--html`, which writes a browser-friendly static HTML report with inline screenshot previews and collapsible page-state logs. |
 | Browser path includes blocked | `BrowserOutput.path` in `code/schemas.py` now accepts `blocked`. Gateway-blocked Browser failures return `path="blocked"` plus `error_code="gateway_blocked"`. |
 | Screenshots or page-state logs | The Hugging Face recipe writes per-step screenshots and text state logs under the session Browser artifact directory and surfaces those paths in `BrowserOutput.page_state_logs`. |
 | Extracted data | The recipe stores parsed cards under `BrowserOutput.extracted_data["models"]`, and also formats them into Browser content for downstream Distiller/Formatter nodes. Parsed cards are sorted by normalized likes when likes are visible, while the original likes/download strings are preserved for the final table. |
@@ -67,6 +67,12 @@ The important constraints are:
 
 - `code/replay.py`
   - Adds `uv run python replay.py --report <session_id>`.
+  - Adds `uv run python replay.py --html <session_id>`, which writes
+    `state/sessions/<session_id>/replay_report.html` by default.
+  - Supports `--html --output <path>` for writing the static report to a custom
+    location.
+  - Renders the final Markdown comparison table as an HTML table and preserves
+    links to original screenshot and text-log artifacts.
   - Keeps existing interactive replay behavior unchanged.
 
 - `code/prompts/planner.md`
@@ -82,7 +88,8 @@ The important constraints are:
 - `code/tests/test_assignment_browser_report.py`
   - Adds regression coverage for the Browser blocked path, Hugging Face card
     extraction, distractor-link rejection, likes sorting, replay report
-    sections, and Planner prompt guardrails.
+    sections, HTML report rendering, HTML escaping, CLI report writes, and
+    Planner prompt guardrails.
 
 ## Test And Verification Commands
 
@@ -114,7 +121,7 @@ uv run pytest tests/test_assignment_browser_report.py -q
 Expected result:
 
 ```text
-6 passed
+10 passed
 ```
 
 Optional compile check:
@@ -158,11 +165,30 @@ Compare top 3 Hugging Face text-generation models sorted by likes. Return a stru
 ```
 
 After the run, `run_demo.sh` prints the session directory. Capture the session
-id, then generate the assignment report:
+id, then generate the Markdown assignment report:
 
 ```bash
 cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09/code
 uv run python replay.py --report <session_id>
+```
+
+For the browser-friendly static report, run:
+
+```bash
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09/code
+uv run python replay.py --html <session_id>
+```
+
+By default this writes:
+
+```text
+state/sessions/<session_id>/replay_report.html
+```
+
+To choose a custom destination:
+
+```bash
+uv run python replay.py --html --output /tmp/replay.html <session_id>
 ```
 
 ### 4. Live Run Acceptance Checklist
@@ -182,6 +208,8 @@ The live run is assignment-complete when the report shows:
     and Most Likes.
 - `## 5. Screenshots Or Page-State Logs`
   - Lists paths under `code/state/sessions/<session_id>/browser/...`.
+  - In the HTML report, screenshots are shown inline and paired text logs are
+    available in collapsible sections.
 - `## 6. Extracted Data`
   - Contains exactly three model records under `models`.
   - Shows `sort_verified: true` when Hugging Face exposes `sort=likes` in the
@@ -189,7 +217,8 @@ The live run is assignment-complete when the report shows:
     exposed cleanly, the report should include a warning rather than invented
     popularity values.
 - `## 7. Final Comparison Table`
-  - Contains a Markdown table with three rows.
+  - Contains a Markdown table with three rows in `--report`.
+  - Renders as an HTML table in `--html`.
 - `## 8. Turn Count And Cost Summary`
   - Shows Browser turns and gateway cost-by-agent data.
 
@@ -227,11 +256,13 @@ cd code
 uv run pytest tests/test_assignment_browser_report.py -q
 uv run pytest tests/ -q
 uv run python -m py_compile browser/recipes.py browser/skill.py replay.py schemas.py
+uv run python replay.py --html s8-dfa90971
 cd ..
 git diff --check
 ```
 
-The assignment-focused suite passed with `6 passed`, and the curated test suite
-passed with `47 passed`. A live Browser run was not
-performed in that pass because `:8109` reported a bind conflict while HTTP
-probes to the gateway refused connections.
+The assignment-focused suite now passes with `10 passed`. A static HTML report
+was generated for the live session at
+`code/state/sessions/s8-dfa90971/replay_report.html`. The earlier full curated
+test suite passed with `47 passed`; rerun `uv run pytest tests/ -q` after any
+additional code changes if you need a fresh full-suite count.

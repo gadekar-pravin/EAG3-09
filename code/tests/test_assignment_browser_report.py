@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
@@ -195,11 +197,17 @@ def test_huggingface_extraction_parses_current_rendered_metric_layout() -> None:
 
 
 class _FakeStore:
+    page_state_logs: list[str] = ["/tmp/browser/01.txt"]
+    query = "Compare top 3 Hugging Face text-generation models sorted by likes."
+    model_id = "alpha/Model-A"
+    final_answer = "| Rank | Model |\n|---|---|\n| 1 | alpha/Model-A |"
+    dir = Path("/tmp/browser-session")
+
     def __init__(self, _session_id: str):
         return None
 
     def read_query(self) -> str:
-        return "Compare top 3 Hugging Face text-generation models sorted by likes."
+        return self.query
 
     def read_graph(self):
         g = nx.DiGraph()
@@ -207,10 +215,11 @@ class _FakeStore:
             ("n:1", "planner"),
             ("n:2", "browser"),
             ("n:3", "distiller"),
+            ("n:5", "critic"),
             ("n:4", "formatter"),
         ]:
             g.add_node(nid, skill=skill, status="complete")
-        g.add_edges_from([("n:1", "n:2"), ("n:2", "n:3"), ("n:3", "n:4")])
+        g.add_edges_from([("n:1", "n:2"), ("n:2", "n:3"), ("n:3", "n:5"), ("n:5", "n:4")])
         return g
 
     def read_all_nodes(self) -> list[NodeState]:
@@ -226,8 +235,8 @@ class _FakeStore:
             ],
             "final_url": "https://huggingface.co/models?pipeline_tag=text-generation&sort=likes",
             "artifacts_dir": "/tmp/browser",
-            "page_state_logs": ["/tmp/browser/01.txt"],
-            "extracted_data": {"models": [{"rank": 1, "model_id": "alpha/Model-A"}]},
+            "page_state_logs": self.page_state_logs,
+            "extracted_data": {"models": [{"rank": 1, "model_id": self.model_id}]},
         }
         return [
             NodeState(node_id="n:1", skill="planner", status="complete"),
@@ -244,13 +253,23 @@ class _FakeStore:
                 result=AgentResult(success=True, agent_name="distiller", output={"fields": {}}),
             ),
             NodeState(
+                node_id="n:5",
+                skill="critic",
+                status="complete",
+                result=AgentResult(
+                    success=True,
+                    agent_name="critic",
+                    output={"verdict": "pass", "rationale": "The extracted rows are supported."},
+                ),
+            ),
+            NodeState(
                 node_id="n:4",
                 skill="formatter",
                 status="complete",
                 result=AgentResult(
                     success=True,
                     agent_name="formatter",
-                    output={"final_answer": "| Rank | Model |\n|---|---|\n| 1 | alpha/Model-A |"},
+                    output={"final_answer": self.final_answer},
                 ),
             ),
         ]
@@ -277,6 +296,71 @@ def test_replay_report_renders_assignment_sections(monkeypatch) -> None:
     assert "Text Generation" in report
     assert "alpha/Model-A" in report
     assert "browser/gemini" in report
+
+
+def test_replay_html_report_renders_assignment_sections(monkeypatch, tmp_path) -> None:
+    png = tmp_path / "01_text_generation.png"
+    txt = tmp_path / "01_text_generation.txt"
+    png.write_bytes(b"not-really-a-png")
+    txt.write_text("page state with <unsafe> text", encoding="utf-8")
+
+    class FakeHtmlStore(_FakeStore):
+        page_state_logs = [str(png), str(txt)]
+        query = "Compare <top 3> Hugging Face models."
+        model_id = "alpha/<Model-A>"
+        final_answer = (
+            "Here is the table:\n\n"
+            "| Rank | Model | URL |\n"
+            "| :--- | :--- | :--- |\n"
+            "| 1 | alpha/<Model-A> | [Link](https://huggingface.co/alpha/Model-A) |"
+        )
+
+    monkeypatch.setattr(replay, "SessionStore", FakeHtmlStore)
+    monkeypatch.setattr(replay, "_fetch_cost_summary", lambda *_args, **_kwargs: "- browser/gemini: calls=3")
+
+    html = replay.build_html_report("sid")
+
+    for heading in [
+        "1. Original User Goal",
+        "2. Planner DAG",
+        "3. Browser Path Chosen",
+        "4. Browser Actions Taken",
+        "5. Screenshots Or Page-State Logs",
+        "6. Extracted Data",
+        "7. Final Comparison Table",
+        "8. Turn Count And Cost Summary",
+    ]:
+        assert heading in html
+    assert '<span class="badge">deterministic</span>' in html
+    assert "Text Generation" in html
+    assert "Critic:" in html
+    assert "pass" in html
+    assert "browser/gemini: calls=3" in html
+    assert "<img" in html
+    assert "01_text_generation.png" in html
+    assert "<details><summary>Page-state log</summary>" in html
+    assert "page state with &lt;unsafe&gt; text" in html
+    assert "<table>" in html
+    assert "&lt;top 3&gt;" in html
+    assert "alpha/&lt;Model-A&gt;" in html
+    assert "<script" not in html
+
+
+def test_replay_html_cli_writes_output_path(monkeypatch, tmp_path) -> None:
+    out = tmp_path / "report.html"
+
+    monkeypatch.setattr(replay, "SessionStore", _FakeStore)
+    monkeypatch.setattr(replay, "_fetch_cost_summary", lambda *_args, **_kwargs: "- browser/gemini: calls=3")
+    monkeypatch.setattr(sys, "argv", ["replay.py", "--html", "--output", str(out), "sid"])
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        assert replay.main() == 0
+
+    assert stdout.getvalue().strip() == str(out)
+    text = out.read_text(encoding="utf-8")
+    assert "Browser Comparison Replay Report" in text
+    assert "alpha/Model-A" in text
 
 
 def test_planner_prompt_guards_huggingface_assignment_route() -> None:

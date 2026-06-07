@@ -36,7 +36,7 @@ EAG3-09/
 │   ├── memory.py          # FAISS-backed vector memory
 │   ├── recovery.py        # failure classification + recovery decisions
 │   ├── persistence.py     # per-session DAG + node snapshots
-│   ├── replay.py          # pretty-print a finished session
+│   ├── replay.py          # inspect a finished session; Markdown/HTML reports
 │   └── state/             # runtime state (sessions, artifacts, FAISS index)
 ├── llm_gatewayV9/         # the gateway (see its own README for provider matrix)
 ├── docs/session-09.md     # architecture + assignment notes
@@ -182,6 +182,42 @@ Replay a finished session's DAG and node outputs in completion order:
 ```bash
 cd code
 uv run python replay.py <session_id>
+```
+
+Generate the assignment replay report as Markdown:
+
+```bash
+cd code
+uv run python replay.py --report <session_id>
+```
+
+Generate the same report as a browser-friendly static HTML file:
+
+```bash
+cd code
+uv run python replay.py --html <session_id>
+```
+
+By default, the HTML report is written to:
+
+```text
+code/state/sessions/<session_id>/replay_report.html
+```
+
+You can also choose the destination:
+
+```bash
+uv run python replay.py --html --output /tmp/replay.html <session_id>
+```
+
+The HTML report keeps the same eight assignment sections as `--report`, but
+adds inline screenshot previews, collapsible page-state logs, a node summary,
+critic result, extracted JSON, and a rendered HTML comparison table. For
+example, the checked live Browser assignment run can be rendered with:
+
+```bash
+cd /Users/pravingadekar/Documents/EAG3/EAG3-09/EAG3-09/code
+uv run python replay.py --html s8-dfa90971
 ```
 
 To see the exact prompt sent for a given node:
