@@ -19,3 +19,6 @@ logs/
 # IDE / OS
 .idea/
 .DS_Store
+
+# local docs (not version-controlled)
+docs/
