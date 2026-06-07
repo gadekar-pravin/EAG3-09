@@ -29,8 +29,10 @@ class RecipeResult:
 _HF_HOST_RE = re.compile(r"^https?://(?:www\.)?huggingface\.co/models/?", re.I)
 _MODEL_PATH_RE = re.compile(r"^/([^/\s?#]+/[^/\s?#]+)")
 _COUNT = r"\d[\d,]*(?:\.\d+)?\s*[kKmM]?"
+_PARAM_COUNT = r"(?:[<>]\s*)?\d[\d,]*(?:\.\d+)?\s*[bB]"
 _LIKES_RE = re.compile(rf"(?P<num>{_COUNT})\s*(?:likes?|like)", re.I)
 _DOWNLOADS_RE = re.compile(rf"(?P<num>{_COUNT})\s*(?:downloads?|download)", re.I)
+_PARAMETERS_RE = re.compile(rf"(?P<num>{_PARAM_COUNT})\s*(?:params?|parameters?)?", re.I)
 _MODEL_SIGNAL_RE = re.compile(
     r"\b(?:text-generation|text generation|transformers|safetensors|updated|"
     r"downloads?|likes?|model card)\b",
@@ -79,8 +81,12 @@ def _first_match(pattern: re.Pattern[str], text: str) -> str:
     return (m.group("num").strip() if m else "")
 
 
+def _normalise_metric(value: str) -> str:
+    return re.sub(r"\s+", "", (value or "").strip())
+
+
 def _parse_count(value: str) -> float | None:
-    raw = (value or "").strip().lower().replace(",", "")
+    raw = _normalise_metric(value).lower().replace(",", "")
     if not raw:
         return None
     multiplier = 1.0
@@ -94,6 +100,55 @@ def _parse_count(value: str) -> float | None:
         return float(raw.strip()) * multiplier
     except ValueError:
         return None
+
+
+def _split_card_text(text: str) -> list[str]:
+    parts = re.split(r"\s*[•·]\s*|\n+", text or "")
+    return [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+
+
+def _metric_from_token(token: str) -> str:
+    m = re.fullmatch(rf"{_COUNT}", token.strip(), re.I)
+    return _normalise_metric(m.group(0)) if m else ""
+
+
+def _parameter_from_token(token: str) -> str:
+    m = re.fullmatch(rf"{_PARAM_COUNT}", token.strip(), re.I)
+    return _normalise_metric(m.group(0)) if m else ""
+
+
+def _extract_visible_hf_metrics(text: str) -> tuple[str, str, str]:
+    """Parse Hugging Face's compact card layout.
+
+    Current rendered cards often expose metrics as bullet-separated values
+    without labels:
+
+      model-id
+      Text Generation • 685B • Updated ... • 5.75M • • 13.4k
+
+    In that shape, the first B-suffixed count is the parameter size, the
+    penultimate K/M count is downloads, and the final K/M count is likes.
+    Prefer labeled matches when Hugging Face exposes accessible labels.
+    """
+    likes = _normalise_metric(_first_match(_LIKES_RE, text))
+    downloads = _normalise_metric(_first_match(_DOWNLOADS_RE, text))
+    parameters = _normalise_metric(_first_match(_PARAMETERS_RE, text))
+
+    tokens = _split_card_text(text)
+    if not parameters:
+        for token in tokens:
+            parameters = _parameter_from_token(token)
+            if parameters:
+                break
+
+    unlabeled_counts = [_metric_from_token(token) for token in tokens]
+    unlabeled_counts = [count for count in unlabeled_counts if count]
+    if not likes and unlabeled_counts:
+        likes = unlabeled_counts[-1]
+    if not downloads and len(unlabeled_counts) >= 2:
+        downloads = unlabeled_counts[-2]
+
+    return likes, downloads, parameters
 
 
 def _is_probable_model_path(path: str) -> bool:
@@ -157,12 +212,16 @@ def extract_hf_model_cards(html_text: str, *, base_url: str = "https://huggingfa
             continue
         seen.add(model_id)
 
-        likes = _first_match(_LIKES_RE, text)
-        downloads = _first_match(_DOWNLOADS_RE, text)
+        likes, downloads, parameters = _extract_visible_hf_metrics(text)
         lines = [ln.strip() for ln in re.split(r"\s{2,}|\n", text) if ln.strip()]
         description = ""
         for ln in lines:
-            if model_id not in ln and not _LIKES_RE.search(ln) and not _DOWNLOADS_RE.search(ln):
+            if (
+                model_id not in ln
+                and not _LIKES_RE.search(ln)
+                and not _DOWNLOADS_RE.search(ln)
+                and not _PARAMETERS_RE.fullmatch(ln.strip())
+            ):
                 description = ln
                 break
         card = {
@@ -171,6 +230,7 @@ def extract_hf_model_cards(html_text: str, *, base_url: str = "https://huggingfa
             "model_url": urljoin(base_url, "/" + model_id),
             "likes": likes,
             "downloads": downloads,
+            "parameters": parameters,
             "description": description,
         }
         likes_count = _parse_count(likes)
@@ -223,6 +283,7 @@ def format_hf_cards_content(cards: list[dict]) -> str:
             f"{card.get('rank')}. {card.get('model_id')} | "
             f"likes={card.get('likes') or 'unavailable'} | "
             f"downloads={card.get('downloads') or 'unavailable'} | "
+            f"parameters={card.get('parameters') or 'unavailable'} | "
             f"description={card.get('description') or 'unavailable'} | "
             f"url={card.get('model_url')}"
         )

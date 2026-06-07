@@ -31,6 +31,7 @@ Notes:
             "model_id": "...",
             "likes": "...",
             "downloads": "...",
+            "parameters": "...",
             "description": "...",
             "model_url": "..."
           }
@@ -39,8 +40,9 @@ Notes:
       "rationale": "..."
     }
     Include exactly three model records when the Browser input contains
-    three rendered cards. Leave missing likes/downloads/description fields
-    as "unavailable"; do not invent them.
+    three rendered cards. Preserve Browser-provided likes, downloads,
+    parameters, and URLs exactly. Leave missing description fields as
+    "unavailable"; do not invent them.
   - When the question is a comparison (`fastest growing`, `largest`),
     emit a `comparison` key with `winner: <id>` and `reason: <short>`.
   - When the question's evidence is missing, set `fields: {}` and put

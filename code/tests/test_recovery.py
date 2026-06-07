@@ -171,6 +171,36 @@ def _fail_result() -> AgentResult:
                        output={"verdict": "fail", "rationale": "syllables off"})
 
 
+def _missing_models_result() -> AgentResult:
+    return AgentResult(
+        success=True,
+        agent_name="distiller",
+        output={
+            "fields": {
+                "models": [
+                    {
+                        "rank": 1,
+                        "model_id": "deepseek-ai/DeepSeek-R1",
+                        "likes": "unavailable",
+                        "downloads": "5.75M",
+                        "parameters": "685B",
+                        "description": "unavailable",
+                    },
+                    {
+                        "rank": 2,
+                        "model_id": "meta-llama/Meta-Llama-3-8B",
+                        "likes": "unavailable",
+                        "downloads": "1.52M",
+                        "parameters": "8B",
+                        "description": "unavailable",
+                    },
+                ]
+            },
+            "rationale": "Browser did not expose likes or descriptions.",
+        },
+    )
+
+
 def test_critic_fail_auto_inserted_splices_planner_and_skips_child() -> None:
     g = _StubGraph()
     _seed_critic_branch(g, auto_inserted=True)
@@ -207,6 +237,33 @@ def test_critic_fail_cap_fires_on_second_failure_for_same_target() -> None:
     assert handled is True
     assert cap == ["n:t"], "cap-hit should be surfaced for future logging"
     assert [a[1] for a in g._added] == [], "no second planner should be queued"
+
+
+def test_critic_fail_stable_missing_field_key_recovers_once_across_new_targets() -> None:
+    g = _StubGraph()
+    _seed_critic_branch(g, auto_inserted=True)
+    g.g.nodes["n:t"]["result"] = _missing_models_result()
+    recovered: dict[str, bool] = {}
+    cap: list[str] = []
+
+    handled = handle_critic_verdict("n:c", _fail_result(), g, recovered, cap)
+
+    assert handled is True
+    assert [a[1] for a in g._added] == ["planner"]
+    signature = g._added[0][3]["recovery_signature"]
+    assert signature.startswith("structured_missing:")
+    assert cap == []
+
+    g2 = _StubGraph()
+    _seed_critic_branch(g2, auto_inserted=True)
+    g2.g.nodes["n:t"]["result"] = _missing_models_result()
+    cap2: list[str] = []
+
+    handled = handle_critic_verdict("n:c", _fail_result(), g2, recovered, cap2)
+
+    assert handled is True
+    assert g2._added == []
+    assert cap2 == ["n:t"]
 
 
 def test_critic_pass_returns_false_no_splice() -> None:

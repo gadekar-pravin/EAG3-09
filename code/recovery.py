@@ -20,6 +20,7 @@ The orchestrator imports `plan_recovery` and acts on the returned
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Literal
 
 RecoveryReason = Literal["transient", "validation_error", "upstream_failure"]
@@ -96,6 +97,50 @@ def plan_recovery(
     )
 
 
+def _is_missing_field(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip() or value.strip().lower() in {"unavailable", "not available", "unknown"}
+    return False
+
+
+def _stable_structured_failure_key(target_result) -> str | None:
+    """Return a run-stable key for repeated structured-data misses.
+
+    Critic recovery is normally capped per target node. A recovery Planner
+    creates new target nodes, though, so a site that keeps returning the same
+    incomplete structured data can loop until MAX_NODES. For structured model
+    tables, key by the visible record ids plus the fields that are still
+    missing/unavailable.
+    """
+    output = getattr(target_result, "output", None)
+    if not isinstance(output, dict):
+        return None
+    fields = output.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    models = fields.get("models")
+    if not isinstance(models, list) or not models:
+        return None
+
+    ids: list[str] = []
+    missing: set[str] = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        model_id = str(model.get("model_id") or model.get("model") or model.get("name") or "").strip()
+        if model_id:
+            ids.append(model_id)
+        for field in ("likes", "downloads", "parameters", "description"):
+            if field in model and _is_missing_field(model.get(field)):
+                missing.add(field)
+    if not ids or not missing:
+        return None
+    payload = {"ids": ids, "missing": sorted(missing)}
+    return "structured_missing:" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def handle_critic_verdict(nid: str, result, graph, recovered_branches: dict,
                           cap_hit: list) -> bool:
     """Critic-fail policy (P1 #5). Returns True when the caller should skip
@@ -121,14 +166,24 @@ def handle_critic_verdict(nid: str, result, graph, recovered_branches: dict,
         child_nid = succs[0] if succs else None
     if child_nid and child_nid in graph.g.nodes:
         graph.mark(child_nid, "skipped")
-    if target_nid and not recovered_branches.get(target_nid):
-        recovered_branches[target_nid] = True
+
+    target_result = None
+    if target_nid and target_nid in graph.g.nodes:
+        target_result = graph.g.nodes[target_nid].get("result")
+    stable_key = _stable_structured_failure_key(target_result)
+    recovery_key = stable_key or target_nid
+
+    if target_nid and recovery_key and not recovered_branches.get(recovery_key):
+        recovered_branches[recovery_key] = True
         rationale = (result.output or {}).get("rationale", "(no rationale)")
         fr = f"critic failed target={target_nid} child={child_nid} rationale={rationale}"
+        md = {"failure_report": fr,
+              "recovers": target_nid,
+              "recovery_reason": "critic_fail"}
+        if stable_key:
+            md["recovery_signature"] = stable_key
         rec_nid = graph.add_node("planner", inputs=["USER_QUERY"],
-                                 metadata={"failure_report": fr,
-                                           "recovers": target_nid,
-                                           "recovery_reason": "critic_fail"})
+                                 metadata=md)
         print(f"  ↪ critic-fail recovery: planner node {rec_nid} for {target_nid}")
     elif target_nid:
         cap_hit.append(target_nid)

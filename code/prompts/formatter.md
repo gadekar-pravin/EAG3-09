@@ -27,5 +27,5 @@ Rules:
     nodes do; Retriever nodes do). Do not invent URLs.
   - For the Hugging Face top-3 text-generation models assignment, render
     a Markdown comparison table with exactly three rows and columns:
-    Rank, Model, Likes, Downloads, Description, URL. Use "unavailable"
-    for fields missing from INPUTS.
+    Rank, Model, Likes, Downloads, Parameters, Description, URL. Use
+    "unavailable" for fields missing from INPUTS.

@@ -145,6 +145,55 @@ def test_huggingface_extraction_reports_sort_verification_metadata() -> None:
     assert "final URL does not expose sort=likes after selecting Most Likes" in data["warnings"]
 
 
+def test_huggingface_extraction_parses_current_rendered_metric_layout() -> None:
+    html = """
+    <main>
+      <article class="model-card">
+        <a href="/deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</a>
+        <span>Text Generation</span>
+        <span>•</span><span>685B</span>
+        <span>•</span><span>Updated Mar 27, 2025</span>
+        <span>•</span><span>5.75M</span>
+        <span>•</span><span>•</span><span>13.4k</span>
+      </article>
+      <article class="model-card">
+        <a href="/meta-llama/Meta-Llama-3-8B">meta-llama/Meta-Llama-3-8B</a>
+        <span>Text Generation</span>
+        <span>•</span><span>8B</span>
+        <span>•</span><span>Updated Sep 27, 2024</span>
+        <span>•</span><span>1.52M</span>
+        <span>•</span><span>•</span><span>6.57k</span>
+      </article>
+      <article class="model-card">
+        <a href="/meta-llama/Llama-3.1-8B-Instruct">meta-llama/Llama-3.1-8B-Instruct</a>
+        <span>Text Generation</span>
+        <span>•</span><span>8B</span>
+        <span>•</span><span>Updated Sep 25, 2024</span>
+        <span>•</span><span>11.3M</span>
+        <span>•</span><span>•</span><span>6.01k</span>
+      </article>
+    </main>
+    """
+
+    cards = extract_hf_model_cards(html)
+    data = build_hf_extracted_data(
+        cards,
+        "https://huggingface.co/models?pipeline_tag=text-generation&sort=likes",
+    )
+
+    assert [c["model_id"] for c in cards] == [
+        "deepseek-ai/DeepSeek-R1",
+        "meta-llama/Meta-Llama-3-8B",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ]
+    assert [c["likes"] for c in cards] == ["13.4k", "6.57k", "6.01k"]
+    assert [c["downloads"] for c in cards] == ["5.75M", "1.52M", "11.3M"]
+    assert [c["parameters"] for c in cards] == ["685B", "8B", "8B"]
+    assert [c["description"] for c in cards] == ["", "", ""]
+    assert data["sort_verified"] is True
+    assert data["warnings"] == []
+
+
 class _FakeStore:
     def __init__(self, _session_id: str):
         return None
@@ -237,3 +286,9 @@ def test_planner_prompt_guards_huggingface_assignment_route() -> None:
     assert "https://huggingface.co/models" in prompt
     assert "Do not answer this assignment from MEMORY HITS" in prompt
     assert "Browser → Distiller → Formatter" in prompt
+
+
+def test_formatter_prompt_includes_huggingface_parameters_column() -> None:
+    prompt = Path("prompts/formatter.md").read_text()
+
+    assert "Rank, Model, Likes, Downloads, Parameters, Description, URL" in prompt
