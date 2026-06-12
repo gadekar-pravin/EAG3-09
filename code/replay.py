@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import networkx as nx
 
 from persistence import SessionStore, list_sessions
 from schemas import NodeState
@@ -354,6 +355,68 @@ def _render_markdown_table(markdown: str) -> str:
     return "\n".join(chunks)
 
 
+def _status_class(status: object) -> str:
+    s = str(status or "").lower()
+    if s in {"complete", "completed", "pass", "success", "ok", "done"}:
+        return "ok"
+    if s in {"failed", "fail", "error", "blocked"}:
+        return "bad"
+    return "neutral"
+
+
+def _status_pill(status: object) -> str:
+    text = str(status or "-")
+    return f'<span class="pill {_status_class(text)}">{_html_text(text)}</span>'
+
+
+def _svg_dag(graph: "nx.DiGraph") -> str:
+    cols = [sorted(gen) for gen in nx.topological_generations(graph)]
+    if not cols:
+        raise ValueError("empty graph")
+    box_w, box_h, x_gap, y_gap, pad = 150, 52, 72, 26, 14
+    n_rows = max(len(col) for col in cols)
+    total_h = n_rows * box_h + (n_rows - 1) * y_gap + 2 * pad
+    total_w = 2 * pad + len(cols) * box_w + (len(cols) - 1) * x_gap
+    pos: dict[str, tuple[float, float]] = {}
+    for ci, col in enumerate(cols):
+        col_h = len(col) * box_h + (len(col) - 1) * y_gap
+        y0 = (total_h - col_h) / 2
+        for ri, nid in enumerate(col):
+            pos[nid] = (pad + ci * (box_w + x_gap), y0 + ri * (box_h + y_gap))
+
+    parts = [
+        f'<svg class="dag" viewBox="0 0 {total_w:.0f} {total_h:.0f}" '
+        'role="img" aria-label="Planner DAG">',
+        '<defs><marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M 0 1 L 9 5 L 0 9 z"/></marker></defs>',
+    ]
+    for u, v in graph.edges:
+        x1, y1 = pos[u]
+        x2, y2 = pos[v]
+        sx, sy = x1 + box_w, y1 + box_h / 2
+        ex, ey = x2, y2 + box_h / 2
+        mx = (sx + ex) / 2
+        parts.append(
+            f'<path class="dag-edge" d="M {sx:.0f} {sy:.0f} '
+            f'C {mx:.0f} {sy:.0f}, {mx:.0f} {ey:.0f}, {ex:.0f} {ey:.0f}" '
+            'marker-end="url(#dag-arrow)"/>'
+        )
+    for nid, (x, y) in pos.items():
+        data = graph.nodes[nid]
+        parts.append(f'<g class="dag-node {_status_class(data.get("status"))}">')
+        parts.append(f'<rect x="{x:.0f}" y="{y:.0f}" width="{box_w}" height="{box_h}" rx="9"/>')
+        parts.append(f'<text class="dag-id" x="{x + 14:.0f}" y="{y + 21:.0f}">{_html_text(nid)}</text>')
+        parts.append(
+            f'<text class="dag-skill" x="{x + 14:.0f}" y="{y + 39:.0f}">'
+            f'{_html_text(data.get("skill") or "?")}</text>'
+        )
+        parts.append(f'<circle class="dag-dot" cx="{x + box_w - 14:.0f}" cy="{y + box_h / 2:.0f}" r="4"/>')
+        parts.append("</g>")
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def _html_dag(store: SessionStore, states: list[NodeState]) -> str:
     try:
         graph = store.read_graph()
@@ -363,6 +426,11 @@ def _html_dag(store: SessionStore, states: list[NodeState]) -> str:
         items = "".join(f"<li>{_html_text(_node_label(st))}</li>" for st in states)
         return f"<ul class=\"node-list\">{items}</ul>"
 
+    try:
+        return _svg_dag(graph)
+    except Exception:  # noqa: BLE001 - cycles/partial graphs fall back to lists
+        pass
+
     node_items = []
     for nid in graph.nodes:
         data = graph.nodes[nid]
@@ -370,7 +438,7 @@ def _html_dag(store: SessionStore, states: list[NodeState]) -> str:
             "<li>"
             f"<span class=\"node-id\">{_html_text(nid)}</span>"
             f"<span>{_html_text(data.get('skill'))}</span>"
-            f"<span class=\"status\">{_html_text(data.get('status'))}</span>"
+            f"{_status_pill(data.get('status'))}"
             "</li>"
         )
     edge_items = "".join(
@@ -396,9 +464,9 @@ def _html_actions(actions: list[dict]) -> str:
             bits.append(f"{kind} {label}".strip())
         items.append(
             "<li>"
-            f"<span class=\"turn\">Turn {_html_text(step.get('turn', '?'))}</span>"
-            f"<span>{_html_text(', '.join(bits) or '(no action)')}</span>"
-            f"<span class=\"status\">{_html_text(step.get('outcome') or 'ok')}</span>"
+            f"<span class=\"turn\">{_html_text(step.get('turn', '?'))}</span>"
+            f"<span class=\"act\">{_html_text(', '.join(bits) or '(no action)')}</span>"
+            f"{_status_pill(step.get('outcome') or 'ok')}"
             "</li>"
         )
     return f"<ol class=\"timeline\">{''.join(items)}</ol>"
@@ -440,7 +508,10 @@ def _html_artifacts(browser_out: dict) -> str:
             f"<p><strong>Artifacts directory:</strong> "
             f"{_html_link(str(browser_out['artifacts_dir']))}</p>"
         )
-    for group in _group_page_state_logs(paths):
+    groups = _group_page_state_logs(paths)
+    if groups:
+        chunks.append("<div class=\"artifact-grid\">")
+    for group in groups:
         title = _html_text(group["stem"])
         chunks.append("<article class=\"artifact-card\">")
         chunks.append(f"<h3>{title}</h3>")
@@ -458,6 +529,8 @@ def _html_artifacts(browser_out: dict) -> str:
         links = " ".join(_html_link(path, Path(path).name) for path in group["files"])
         chunks.append(f"<p class=\"artifact-links\">{links}</p>")
         chunks.append("</article>")
+    if groups:
+        chunks.append("</div>")
     return "\n".join(chunks)
 
 
@@ -474,8 +547,20 @@ def _html_cost_summary(cost_summary: str) -> str:
         return "<p class=\"muted\">none recorded</p>"
     lines = [line.strip() for line in cost_summary.splitlines() if line.strip()]
     if lines and all(line.startswith("- ") for line in lines):
-        items = "".join(f"<li>{_html_text(line[2:])}</li>" for line in lines)
-        return f"<ul>{items}</ul>"
+        items = []
+        for line in lines:
+            text = line[2:]
+            head, sep, dollars = text.rpartition(", dollars=")
+            if sep:
+                items.append(
+                    "<li>"
+                    f"<span>{_html_text(head)}</span>"
+                    f"<span class=\"cost-dollars\">{_html_text(dollars)}</span>"
+                    "</li>"
+                )
+            else:
+                items.append(f"<li><span>{_html_text(text)}</span></li>")
+        return f"<ul class=\"cost-list\">{''.join(items)}</ul>"
     return f"<pre>{_html_text(cost_summary)}</pre>"
 
 
@@ -488,11 +573,11 @@ def _html_node_summaries(states: list[NodeState]) -> str:
         error = result.error if result and result.error else ""
         rows.append(
             "<tr>"
-            f"<td>{_html_text(st.node_id)}</td>"
+            f"<td class=\"mono\">{_html_text(st.node_id)}</td>"
             f"<td>{_html_text(st.skill)}</td>"
-            f"<td>{_html_text(st.status)}</td>"
-            f"<td>{_html_text(elapsed)}</td>"
-            f"<td>{_html_text(provider)}</td>"
+            f"<td>{_status_pill(st.status)}</td>"
+            f"<td class=\"mono\">{_html_text(elapsed)}</td>"
+            f"<td class=\"mono\">{_html_text(provider)}</td>"
             f"<td>{_html_text(error[:160])}</td>"
             "</tr>"
         )
@@ -501,6 +586,307 @@ def _html_node_summaries(states: list[NodeState]) -> str:
         "<th>Elapsed</th><th>Provider</th><th>Error</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
+
+
+# Plain string (not an f-string) so CSS braces need no doubling.
+_REPORT_CSS = """
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f16;
+      --panel: #111927;
+      --panel-deep: #0b121d;
+      --ink: #e7eef7;
+      --muted: #8294a8;
+      --line: #1f2c3d;
+      --accent: #38e1c3;
+      --accent-soft: rgba(56, 225, 195, 0.12);
+      --ok: #46d68f;
+      --ok-soft: rgba(70, 214, 143, 0.12);
+      --bad: #ff7373;
+      --bad-soft: rgba(255, 115, 115, 0.12);
+      --warn: #f5b945;
+      --display: "Chakra Petch", "Avenir Next Condensed", system-ui, sans-serif;
+      --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: var(--body);
+      line-height: 1.55;
+      background:
+        linear-gradient(rgba(56, 225, 195, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(56, 225, 195, 0.03) 1px, transparent 1px),
+        radial-gradient(1100px 500px at 75% -10%, rgba(56, 225, 195, 0.07), transparent 60%),
+        var(--bg);
+      background-size: 36px 36px, 36px 36px, auto, auto;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(13, 20, 31, 0.6), rgba(10, 15, 22, 0.92));
+      padding: 40px max(24px, calc((100vw - 1120px) / 2)) 0;
+    }
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 10px;
+    }
+    h1, h2, h3 { font-family: var(--display); margin-top: 0; line-height: 1.15; }
+    h1 { font-size: 34px; letter-spacing: 0.01em; margin-bottom: 6px; }
+    h2 { font-size: 19px; letter-spacing: 0.04em; text-transform: uppercase; }
+    h2::after {
+      content: "";
+      display: block;
+      width: 44px;
+      height: 2px;
+      margin-top: 8px;
+      background: var(--accent);
+      opacity: 0.8;
+    }
+    h3 { font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+    .session-line { color: var(--muted); margin: 0 0 18px; }
+    .session-line strong { font-family: var(--mono); color: var(--ink); font-weight: 600; }
+    .stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; }
+    .stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(17, 25, 39, 0.7);
+      padding: 8px 14px;
+    }
+    .stat-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .stat-value { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+    .toc { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .toc a {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      text-decoration: none;
+    }
+    .toc a:hover { color: var(--accent); }
+    .toc a span { color: var(--accent); margin-right: 6px; }
+    main { width: min(1120px, calc(100vw - 32px)); margin: 28px auto 64px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 30px rgba(2, 6, 12, 0.45);
+      animation: rise 0.55s ease both;
+    }
+    section:nth-of-type(2) { animation-delay: 0.05s; }
+    section:nth-of-type(3) { animation-delay: 0.1s; }
+    section:nth-of-type(4) { animation-delay: 0.15s; }
+    section:nth-of-type(5) { animation-delay: 0.2s; }
+    section:nth-of-type(6) { animation-delay: 0.25s; }
+    section:nth-of-type(7) { animation-delay: 0.3s; }
+    section:nth-of-type(8) { animation-delay: 0.35s; }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      section { animation: none; }
+      .artifact-card { transition: none; }
+    }
+    a { color: var(--accent); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 14px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(56, 225, 195, 0.35);
+      font-family: var(--mono);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 13px;
+    }
+    .muted { color: var(--muted); }
+    .mono { font-family: var(--mono); font-size: 13px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .pill.ok { color: var(--ok); border-color: rgba(70, 214, 143, 0.4); background: var(--ok-soft); }
+    .pill.bad { color: var(--bad); border-color: rgba(255, 115, 115, 0.4); background: var(--bad-soft); }
+    .node-list { padding-left: 0; list-style: none; }
+    .node-list li {
+      display: grid;
+      grid-template-columns: 92px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .node-id { font-family: var(--mono); }
+    .dag { display: block; width: 100%; max-width: 980px; height: auto; margin: 6px 0 18px; }
+    .dag-node rect { fill: var(--panel-deep); stroke: var(--line); stroke-width: 1.4; }
+    .dag-node.ok rect { stroke: rgba(70, 214, 143, 0.55); }
+    .dag-node.bad rect { stroke: rgba(255, 115, 115, 0.6); }
+    .dag-id { font-family: var(--mono); font-size: 13px; font-weight: 600; fill: var(--ink); }
+    .dag-skill { font-family: var(--mono); font-size: 11px; fill: var(--muted); letter-spacing: 0.04em; }
+    .dag-dot { fill: var(--muted); }
+    .dag-node.ok .dag-dot { fill: var(--ok); }
+    .dag-node.bad .dag-dot { fill: var(--bad); }
+    .dag-edge { fill: none; stroke: #33465e; stroke-width: 1.6; }
+    #dag-arrow path { fill: #33465e; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+    th, td { padding: 10px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom-color: #2a3a50;
+    }
+    tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
+    tbody tr:hover { background: var(--accent-soft); }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #070b11;
+      color: #d9e4f1;
+      border: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 16px;
+      border-radius: 8px;
+      overflow: auto;
+    }
+    .timeline { list-style: none; padding: 0; margin: 0; position: relative; }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 16px;
+      top: 10px;
+      bottom: 10px;
+      width: 1px;
+      background: var(--line);
+    }
+    .timeline li {
+      display: grid;
+      grid-template-columns: 34px 1fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 9px 0;
+      position: relative;
+    }
+    .turn {
+      width: 33px;
+      height: 33px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      background: var(--panel-deep);
+      border: 1px solid var(--line);
+      position: relative;
+      z-index: 1;
+    }
+    .act { overflow-wrap: anywhere; }
+    .artifact-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-top: 14px;
+    }
+    .artifact-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-deep);
+      padding: 16px;
+      margin: 0;
+      transition: transform 0.18s ease, border-color 0.18s ease;
+    }
+    .artifact-card:hover { transform: translateY(-2px); border-color: rgba(56, 225, 195, 0.35); }
+    .artifact-card img {
+      display: block;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      margin: 10px 0;
+    }
+    .artifact-links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 0; }
+    .artifact-links a {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 10px;
+    }
+    .artifact-links a:hover { border-color: rgba(56, 225, 195, 0.4); }
+    details { margin-top: 10px; }
+    summary {
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0.04em;
+    }
+    .cost-list { list-style: none; padding: 0; margin: 12px 0 0; max-width: 640px; }
+    .cost-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .cost-dollars { color: var(--accent); }
+    .critic { border-left: 3px solid var(--accent); padding-left: 14px; margin-top: 16px; }
+    .critic strong {
+      font-family: var(--display);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 13px;
+      color: var(--accent);
+    }
+    @media (max-width: 720px) {
+      header { padding: 28px 16px 0; }
+      main { width: calc(100vw - 20px); }
+      section { padding: 16px; }
+      h1 { font-size: 26px; }
+      .node-list li { grid-template-columns: 1fr; gap: 4px; }
+      .timeline::before { display: none; }
+      .timeline li { grid-template-columns: 34px 1fr; }
+      .timeline .pill { grid-column: 2; justify-self: start; }
+    }
+"""
 
 
 def build_html_report(session_id: str, *, gateway_url: str = "http://localhost:8109") -> str:
@@ -524,137 +910,48 @@ def build_html_report(session_id: str, *, gateway_url: str = "http://localhost:8
             "</div>"
         )
 
+    status_classes = {_status_class(st.status) for st in states}
+    if "bad" in status_classes:
+        overall = "failed"
+    elif status_classes == {"ok"}:
+        overall = "complete"
+    else:
+        overall = "partial"
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Replay Report - {_html_text(session_id)}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    :root {{
-      color-scheme: light;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --ink: #1d2733;
-      --muted: #687385;
-      --line: #d8dee8;
-      --accent: #126b63;
-      --accent-soft: #e5f4f1;
-      --warn: #8a5a00;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.5;
-    }}
-    header {{
-      background: #17202b;
-      color: white;
-      padding: 32px max(24px, calc((100vw - 1120px) / 2));
-    }}
-    header p {{ color: #c6d0dc; max-width: 920px; }}
-    main {{
-      width: min(1120px, calc(100vw - 32px));
-      margin: 24px auto 56px;
-    }}
-    section {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 22px;
-      margin-bottom: 18px;
-      box-shadow: 0 1px 2px rgba(20, 29, 40, 0.04);
-    }}
-    h1, h2, h3 {{ margin-top: 0; line-height: 1.2; }}
-    h1 {{ font-size: 30px; margin-bottom: 8px; }}
-    h2 {{ font-size: 20px; }}
-    h3 {{ font-size: 15px; color: var(--muted); }}
-    a {{ color: var(--accent); }}
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 5px 10px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-weight: 700;
-    }}
-    .muted {{ color: var(--muted); }}
-    .node-list, .timeline {{ padding-left: 0; list-style: none; }}
-    .node-list li, .timeline li {{
-      display: grid;
-      grid-template-columns: 92px 1fr auto;
-      gap: 12px;
-      align-items: center;
-      padding: 9px 0;
-      border-bottom: 1px solid var(--line);
-    }}
-    .node-id, .turn {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
-    .status {{ color: var(--muted); }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      margin: 12px 0;
-      font-size: 14px;
-    }}
-    th, td {{
-      border: 1px solid var(--line);
-      padding: 9px 10px;
-      text-align: left;
-      vertical-align: top;
-    }}
-    th {{ background: #eef2f6; }}
-    pre {{
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: #101820;
-      color: #e8eef5;
-      padding: 14px;
-      border-radius: 6px;
-      overflow: auto;
-    }}
-    .artifact-card {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 14px;
-      margin-top: 14px;
-    }}
-    .artifact-card img {{
-      display: block;
-      max-width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      margin: 10px 0;
-    }}
-    .artifact-links {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 0;
-      font-size: 13px;
-    }}
-    details {{ margin-top: 10px; }}
-    summary {{ cursor: pointer; font-weight: 700; }}
-    .critic {{
-      border-left: 4px solid var(--accent);
-      padding-left: 12px;
-      margin-top: 14px;
-    }}
-    @media (max-width: 720px) {{
-      header {{ padding: 24px 16px; }}
-      main {{ width: calc(100vw - 20px); }}
-      section {{ padding: 16px; }}
-      .node-list li, .timeline li {{ grid-template-columns: 1fr; gap: 4px; }}
-    }}
+{_REPORT_CSS}
   </style>
 </head>
 <body>
   <header>
+    <p class="eyebrow">Session Replay // Flight Recorder</p>
     <h1>Browser Comparison Replay Report</h1>
-    <p>Session <strong>{_html_text(session_id)}</strong></p>
+    <p class="session-line">Session <strong>{_html_text(session_id)}</strong></p>
+    <div class="stats">
+      <span class="stat"><span class="stat-label">Run</span>{_status_pill(overall)}</span>
+      <span class="stat"><span class="stat-label">Nodes</span><span class="stat-value">{len(states)}</span></span>
+      <span class="stat"><span class="stat-label">Browser turns</span><span class="stat-value">{_html_text(browser_out.get("turns", 0))}</span></span>
+      <span class="stat"><span class="stat-label">Total turns</span><span class="stat-value">{_html_text(total_turns)}</span></span>
+    </div>
+    <nav class="toc">
+      <a href="#goal"><span>01</span>Goal</a>
+      <a href="#dag"><span>02</span>DAG</a>
+      <a href="#path"><span>03</span>Path</a>
+      <a href="#actions"><span>04</span>Actions</a>
+      <a href="#artifacts"><span>05</span>Artifacts</a>
+      <a href="#extracted"><span>06</span>Extracted</a>
+      <a href="#final"><span>07</span>Comparison</a>
+      <a href="#cost"><span>08</span>Cost</a>
+    </nav>
   </header>
   <main>
     <section id="goal">
